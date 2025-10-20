@@ -5,6 +5,11 @@
 
 set -e  # Exit on error
 
+# Reattach stdin to terminal if piped
+if [ ! -t 0 ]; then
+    exec < /dev/tty
+fi
+
 echo "================================================="
 echo "  Omarchy Unattended Access Configuration Helper"
 echo "================================================="
@@ -25,7 +30,21 @@ read
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root (use sudo)" 
+   echo "This script must be run as root (use sudo)"
+   exit 1
+fi
+
+# Check if running on Omarchy Linux
+if [[ ! -f /etc/os-release ]] || ! grep -qi "omarchy" /etc/os-release; then
+   echo "ERROR: This script is designed for Omarchy Linux only."
+   echo "It appears you are not running Omarchy Linux."
+   echo ""
+   if [[ -f /etc/os-release ]]; then
+       echo "Detected OS:"
+       grep "^PRETTY_NAME=" /etc/os-release | cut -d= -f2 | tr -d '"'
+   fi
+   echo ""
+   echo "Please run this script on an Omarchy Linux system."
    exit 1
 fi
 
