@@ -62,8 +62,8 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     echo "=== Network Configuration ==="
     echo ""
     
-    read -p "SSH port [50122]: " SSH_PORT
-    SSH_PORT=${SSH_PORT:-50122}
+    read -p "SSH port [22]: " SSH_PORT
+    SSH_PORT=${SSH_PORT:-22}
 
     read -p "Network gateway [192.168.1.1]: " GATEWAY
     GATEWAY=${GATEWAY:-192.168.1.1}
