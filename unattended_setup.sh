@@ -172,7 +172,7 @@ EOF
             echo "$SSH_PUBLIC_KEY" >> "$OMARCHY_HOME/.ssh/authorized_keys"
             
             chmod 600 "$OMARCHY_HOME/.ssh/authorized_keys"
-            chown -R omarchy:omarchy "$OMARCHY_HOME/.ssh"
+            chown -R $PRIMARY_USER:$PRIMARY_USER "$OMARCHY_HOME/.ssh"
             echo "✓ SSH public key added"
         else
             echo "No SSH public key added"
