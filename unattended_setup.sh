@@ -35,7 +35,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Check if running on Omarchy Linux
-if [[ ! -f /etc/os-release ]] || ! grep -qi "omarchy" /etc/os-release; then
+if [[ ! -f /etc/os-release ]] || ! grep -qi "ID=arch" /etc/os-release; then
    echo "ERROR: This script is designed for Omarchy Linux only."
    echo "It appears you are not running Omarchy Linux."
    echo ""
