@@ -232,32 +232,54 @@ fi
 # SECTION 3: KEYBINDING CONFIGURATION
 # ============================================
 
-echo ""
-read -p "Would you like to swap the SPECIAL and ALT keybindings? If you're a Mac user, you may find this helpful. If you're a Windows user, you will not. [y/N]: " SWAP_KEYS
-SWAP_KEYS=${SWAP_KEYS:-N}
-
 if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Keybinding Configuration ==="
     echo ""
-
-    HYPR_CONFIG="/home/$PRIMARY_USER/.config/hypr/hyprland.conf"
     
-    if [[ -f "$HYPR_CONFIG" ]]; then
-        # Backup config
-        cp "$HYPR_CONFIG" "${HYPR_CONFIG}.keybind_backup"
-        
-        # Swap SUPER and ALT using temp placeholder method
-        sed -i 's/SUPER/TEMP_PLACEHOLDER/g' "$HYPR_CONFIG"
-        sed -i 's/ALT/SUPER/g' "$HYPR_CONFIG"
-        sed -i 's/TEMP_PLACEHOLDER/ALT/g' "$HYPR_CONFIG"
-        
-        echo "✓ Keybindings swapped (SUPER ↔ ALT)"
-        echo "  Backup created: ${HYPR_CONFIG}.keybind_backup"
-        echo "  Note: You may need to log out and back in for changes to take effect"
+    # Install keyd
+    echo "Installing keyd..."
+    if ! command -v keyd &> /dev/null; then
+        pacman -S --needed --noconfirm keyd
+        echo "✓ keyd installed"
     else
-        echo "⚠ Hyprland config not found at $HYPR_CONFIG"
-        echo "  Keybinding swap skipped"
+        echo "✓ keyd already installed"
+    fi
+    
+    # Create keyd config directory if it doesn't exist
+    echo "Creating keyd configuration..."
+    mkdir -p /etc/keyd
+    
+    # Create the configuration file
+    tee /etc/keyd/default.conf > /dev/null << 'EOF'
+[ids]
+*
+
+[main]
+# Swap Super (Meta) and Alt keys
+leftmeta = leftalt
+leftalt = leftmeta
+rightmeta = rightalt
+rightalt = rightmeta
+EOF
+    
+    echo "✓ Configuration file created at /etc/keyd/default.conf"
+    
+    # Enable and start keyd service
+    echo "Enabling and starting keyd service..."
+    systemctl enable keyd
+    systemctl restart keyd
+    
+    # Check if service is running
+    if systemctl is-active --quiet keyd; then
+        echo "✓ keyd service is running"
+        echo "✓ Super and Alt keys are now swapped system-wide"
+        echo ""
+        echo "  To undo: sudo systemctl stop keyd && sudo systemctl disable keyd"
+        echo "  To modify: edit /etc/keyd/default.conf then sudo systemctl restart keyd"
+    else
+        echo "⚠ Warning: keyd service failed to start"
+        echo "  Check logs with: journalctl -u keyd"
     fi
 else
     echo "Keybinding configuration skipped."
