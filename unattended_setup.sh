@@ -247,10 +247,10 @@ if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
         # Backup config
         cp "$HYPR_CONFIG" "${HYPR_CONFIG}.keybind_backup"
         
-        # Swap SUPER and ALT
-        # This is a basic swap - you may need to customize based on actual config
-        sed -i 's/\$mainMod = SUPER/\$mainMod = ALT/g' "$HYPR_CONFIG"
-        sed -i 's/\, ALT/, SUPER/g' "$HYPR_CONFIG"
+        # Swap SUPER and ALT using temp placeholder method
+        sed -i 's/SUPER/TEMP_PLACEHOLDER/g' "$HYPR_CONFIG"
+        sed -i 's/ALT/SUPER/g' "$HYPR_CONFIG"
+        sed -i 's/TEMP_PLACEHOLDER/ALT/g' "$HYPR_CONFIG"
         
         echo "✓ Keybindings swapped (SUPER ↔ ALT)"
         echo "  Backup created: ${HYPR_CONFIG}.keybind_backup"
