@@ -146,15 +146,15 @@ EOF
         systemctl enable sshd
         systemctl restart sshd
 
-        echo "[Network 5/6] Configuring passwordless sudo for user 'omarchy'..."
+        echo "[Network 5/6] Configuring passwordless sudo for user '$PRIMARY_USER'..."
         if [ ! -d /etc/sudoers.d ]; then
             mkdir -p /etc/sudoers.d
         fi
-        echo "omarchy ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/omarchy
-        chmod 440 /etc/sudoers.d/omarchy
+        echo "$PRIMARY_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$PRIMARY_USER
+        chmod 440 /etc/sudoers.d/$PRIMARY_USER
 
-        echo "[Network 6/6] Configuring SSH public key for omarchy user..."
-        OMARCHY_HOME=$(eval echo ~omarchy)
+        echo "[Network 6/6] Configuring SSH public key for $PRIMARY_USER user..."
+        OMARCHY_HOME=$(eval echo ~$PRIMARY_USER)
         mkdir -p "$OMARCHY_HOME/.ssh"
         
         echo ""
@@ -190,12 +190,12 @@ EOF
         echo "✓ Static IP configured: $STATIC_IP on $INTERFACE"
         echo "✓ SSH configured on port $SSH_PORT"
         if [[ -n "$SSH_PUBLIC_KEY" ]]; then
-            echo "✓ SSH public key added for omarchy user"
+            echo "✓ SSH public key added for $PRIMARY_USER user"
         fi
         echo "✓ Passwordless sudo configured"
         echo ""
         echo "You can now SSH in with:"
-        echo "  ssh -p $SSH_PORT omarchy@$STATIC_IP"
+        echo "  ssh -p $SSH_PORT $PRIMARY_USER@$STATIC_IP"
         echo ""
     fi
 else
@@ -240,8 +240,8 @@ if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Keybinding Configuration ==="
     echo ""
-    
-    HYPR_CONFIG="/home/omarchy/.config/hypr/hyprland.conf"
+
+    HYPR_CONFIG="/home/$PRIMARY_USER/.config/hypr/hyprland.conf"
     
     if [[ -f "$HYPR_CONFIG" ]]; then
         # Backup config
