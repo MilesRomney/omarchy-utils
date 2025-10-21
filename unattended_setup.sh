@@ -232,6 +232,10 @@ fi
 # SECTION 3: KEYBINDING CONFIGURATION
 # ============================================
 
+echo ""
+read -p "Would you like to swap the SPECIAL and ALT keybindings? If you're a Mac user, you may find this helpful. If you're a Windows user, you will not. [y/N]: " SWAP_KEYS
+SWAP_KEYS=${SWAP_KEYS:-N}
+
 if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Keybinding Configuration ==="
