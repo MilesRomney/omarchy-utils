@@ -447,13 +447,16 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 cp "$LIMINE_CONFIG" "${LIMINE_CONFIG}.backup"
                 echo "✓ Backup created: ${LIMINE_CONFIG}.backup"
                 
-                # Check if cryptkey parameter already exists
-                if grep -q "cryptkey=" "$LIMINE_CONFIG"; then
+                # Check if cryptkey parameter already exists on the default kernel command line.
+                if grep -Eq '^KERNEL_CMDLINE\[default\].*cryptkey=' "$LIMINE_CONFIG"; then
                     echo "✓ cryptkey parameter already present in configuration"
+                elif grep -Eq '^KERNEL_CMDLINE\[default\]\+?=.*cryptdevice=' "$LIMINE_CONFIG"; then
+                    # Omarchy may use either KERNEL_CMDLINE[default]="..." or
+                    # KERNEL_CMDLINE[default]+="..."; insert before cryptdevice in either form.
+                    sed -i "/^KERNEL_CMDLINE\\[default\\].*cryptdevice=/ {/cryptkey=/! s|cryptdevice=|cryptkey=rootfs:$KEYFILE cryptdevice=|}" "$LIMINE_CONFIG"
+                    echo "✓ Added cryptkey parameter to kernel command line"
                 else
-                    # Add cryptkey parameter to the first KERNEL_CMDLINE[default] line
-                    # Insert it right after the opening quote, before cryptdevice
-                    sed -i "0,/KERNEL_CMDLINE\[default\]=\"cryptdevice=/s|KERNEL_CMDLINE\[default\]=\"cryptdevice=|KERNEL_CMDLINE[default]=\"cryptkey=rootfs:$KEYFILE cryptdevice=|" "$LIMINE_CONFIG"
+                    echo "KERNEL_CMDLINE[default]+=\"cryptkey=rootfs:$KEYFILE\"" >> "$LIMINE_CONFIG"
                     echo "✓ Added cryptkey parameter to kernel command line"
                 fi
                 
