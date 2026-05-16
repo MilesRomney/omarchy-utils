@@ -80,6 +80,34 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Network Configuration ==="
     echo ""
+
+    # Discover available interfaces and current IPv4 addresses
+    DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    mapfile -t AVAILABLE_INTERFACES < <(ip -o link show | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$')
+
+    if [[ ${#AVAILABLE_INTERFACES[@]} -eq 0 ]]; then
+        echo "Could not detect network interfaces automatically."
+        read -p "Enter network interface name (e.g., enp86s0, eth0): " INTERFACE
+    else
+        echo "Available network interfaces:"
+        for IFACE in "${AVAILABLE_INTERFACES[@]}"; do
+            CURRENT_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | paste -sd ', ' -)
+            CURRENT_IP=${CURRENT_IP:-none}
+            if [[ "$IFACE" == "$DEFAULT_INTERFACE" ]]; then
+                echo "  - $IFACE (current IPv4: $CURRENT_IP) [default route]"
+            else
+                echo "  - $IFACE (current IPv4: $CURRENT_IP)"
+            fi
+        done
+        echo ""
+        read -p "Network interface to configure [${DEFAULT_INTERFACE:-${AVAILABLE_INTERFACES[0]}}]: " INTERFACE
+        INTERFACE=${INTERFACE:-${DEFAULT_INTERFACE:-${AVAILABLE_INTERFACES[0]}}}
+
+        while ! printf '%s\n' "${AVAILABLE_INTERFACES[@]}" | grep -qx "$INTERFACE"; do
+            echo "Invalid interface: $INTERFACE"
+            read -p "Choose one of the listed interfaces: " INTERFACE
+        done
+    fi
     
     read -p "SSH port [22]: " SSH_PORT
     SSH_PORT=${SSH_PORT:-22}
@@ -92,13 +120,6 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         echo "Static IP address is required!"
         read -p "Static IP address: " STATIC_IP
     done
-
-    # Detect primary network interface
-    INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-    if [[ -z "$INTERFACE" ]]; then
-        echo "Could not detect network interface automatically."
-        read -p "Enter network interface name (e.g., enp86s0, eth0): " INTERFACE
-    fi
 
     echo ""
     echo "Configuration Summary:"
@@ -447,16 +468,13 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 cp "$LIMINE_CONFIG" "${LIMINE_CONFIG}.backup"
                 echo "✓ Backup created: ${LIMINE_CONFIG}.backup"
                 
-                # Check if cryptkey parameter already exists on the default kernel command line.
-                if grep -Eq '^KERNEL_CMDLINE\[default\].*cryptkey=' "$LIMINE_CONFIG"; then
+                # Check if cryptkey parameter already exists
+                if grep -q "cryptkey=" "$LIMINE_CONFIG"; then
                     echo "✓ cryptkey parameter already present in configuration"
-                elif grep -Eq '^KERNEL_CMDLINE\[default\]\+?=.*cryptdevice=' "$LIMINE_CONFIG"; then
-                    # Omarchy may use either KERNEL_CMDLINE[default]="..." or
-                    # KERNEL_CMDLINE[default]+="..."; insert before cryptdevice in either form.
-                    sed -i "/^KERNEL_CMDLINE\\[default\\].*cryptdevice=/ {/cryptkey=/! s|cryptdevice=|cryptkey=rootfs:$KEYFILE cryptdevice=|}" "$LIMINE_CONFIG"
-                    echo "✓ Added cryptkey parameter to kernel command line"
                 else
-                    echo "KERNEL_CMDLINE[default]+=\"cryptkey=rootfs:$KEYFILE\"" >> "$LIMINE_CONFIG"
+                    # Add cryptkey parameter to the first KERNEL_CMDLINE[default] line
+                    # Insert it right after the opening quote, before cryptdevice
+                    sed -i "0,/KERNEL_CMDLINE\[default\]=\"cryptdevice=/s|KERNEL_CMDLINE\[default\]=\"cryptdevice=|KERNEL_CMDLINE[default]=\"cryptkey=rootfs:$KEYFILE cryptdevice=|" "$LIMINE_CONFIG"
                     echo "✓ Added cryptkey parameter to kernel command line"
                 fi
                 
