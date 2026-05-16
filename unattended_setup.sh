@@ -452,13 +452,18 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 
                 echo ""
                 echo "[4/6] Adding keyfile to initramfs..."
-                # Update FILES array in mkinitcpio.conf
+                # Update FILES array in mkinitcpio.conf without clobbering existing entries
                 if grep -q "^FILES=(" "$MKINITCPIO_CONF"; then
-                    sed -i "s|^FILES=(.*)|FILES=($KEYFILE)|" "$MKINITCPIO_CONF"
+                    if grep -Fq "$KEYFILE" "$MKINITCPIO_CONF"; then
+                        echo "✓ Keyfile already present in mkinitcpio FILES"
+                    else
+                        sed -i "s|^FILES=(\\(.*\\))|FILES=(\\1 $KEYFILE)|" "$MKINITCPIO_CONF"
+                        echo "✓ Added keyfile to existing mkinitcpio FILES"
+                    fi
                 else
                     echo "FILES=($KEYFILE)" >> "$MKINITCPIO_CONF"
+                    echo "✓ Created mkinitcpio FILES with keyfile"
                 fi
-                echo "✓ Keyfile added to mkinitcpio FILES"
                 
                 echo ""
                 echo "[5/6] Updating kernel command line in Omarchy configuration..."
@@ -472,10 +477,18 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 if grep -q "cryptkey=" "$LIMINE_CONFIG"; then
                     echo "✓ cryptkey parameter already present in configuration"
                 else
-                    # Add cryptkey parameter to the first KERNEL_CMDLINE[default] line
-                    # Insert it right after the opening quote, before cryptdevice
-                    sed -i "0,/KERNEL_CMDLINE\[default\]=\"cryptdevice=/s|KERNEL_CMDLINE\[default\]=\"cryptdevice=|KERNEL_CMDLINE[default]=\"cryptkey=rootfs:$KEYFILE cryptdevice=|" "$LIMINE_CONFIG"
-                    echo "✓ Added cryptkey parameter to kernel command line"
+                    # Add cryptkey before cryptdevice in either:
+                    #   KERNEL_CMDLINE[default]="..."
+                    #   KERNEL_CMDLINE[default]+="..."
+                    if grep -q 'KERNEL_CMDLINE\[default\].*cryptdevice=' "$LIMINE_CONFIG"; then
+                        sed -i -E '0,/KERNEL_CMDLINE\[default\].*cryptdevice=/{s|(KERNEL_CMDLINE\[default\]\+?=")([^"]*?)cryptdevice=|\1\2cryptkey=rootfs:'"$KEYFILE"' cryptdevice=|}' "$LIMINE_CONFIG"
+                        echo "✓ Added cryptkey parameter to existing KERNEL_CMDLINE[default] entry"
+                    else
+                        # Fallback for newer layouts where cryptdevice may be elsewhere.
+                        # Add a standalone default cmdline append line.
+                        echo "KERNEL_CMDLINE[default]+=\"cryptkey=rootfs:$KEYFILE\"" >> "$LIMINE_CONFIG"
+                        echo "✓ Added cryptkey parameter as a new KERNEL_CMDLINE[default]+ entry"
+                    fi
                 fi
                 
                 # Also update /etc/kernel/cmdline for consistency (even though it's not used by Omarchy)
@@ -495,6 +508,10 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 else
                     mkinitcpio -P
                     echo "✓ Initramfs rebuilt"
+                fi
+                if command -v limine-update >/dev/null 2>&1; then
+                    limine-update
+                    echo "✓ Limine entries updated"
                 fi
                 
                 echo ""
