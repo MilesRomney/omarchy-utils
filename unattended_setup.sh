@@ -20,7 +20,8 @@ echo ""
 echo "  1. Configure networking for a static IP, and set up SSH access"
 echo "  2. Install additional packages through the pacman package manager"
 echo "  3. Manage keybindings"
-echo "  4. Configure disk auto-decryption on boot (with options for mitigating security risk)"
+echo "  4. Configure Neovim arrow-key line wrapping"
+echo "  5. Configure disk auto-decryption on boot (with options for mitigating security risk)"
 echo ""
 echo "Brought to you by Miles David Romney at V42 and The Chief Innovator:"
 echo "https://www.linkedin.com/in/miles-david-romney-8b11a4/"
@@ -80,6 +81,34 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Network Configuration ==="
     echo ""
+
+    # Discover available interfaces and current IPv4 addresses
+    DEFAULT_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    mapfile -t AVAILABLE_INTERFACES < <(ip -o link show | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep -v '^lo$')
+
+    if [[ ${#AVAILABLE_INTERFACES[@]} -eq 0 ]]; then
+        echo "Could not detect network interfaces automatically."
+        read -p "Enter network interface name (e.g., enp86s0, eth0): " INTERFACE
+    else
+        echo "Available network interfaces:"
+        for IFACE in "${AVAILABLE_INTERFACES[@]}"; do
+            CURRENT_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | paste -sd ', ' -)
+            CURRENT_IP=${CURRENT_IP:-none}
+            if [[ "$IFACE" == "$DEFAULT_INTERFACE" ]]; then
+                echo "  - $IFACE (current IPv4: $CURRENT_IP) [default route]"
+            else
+                echo "  - $IFACE (current IPv4: $CURRENT_IP)"
+            fi
+        done
+        echo ""
+        read -p "Network interface to configure [${DEFAULT_INTERFACE:-${AVAILABLE_INTERFACES[0]}}]: " INTERFACE
+        INTERFACE=${INTERFACE:-${DEFAULT_INTERFACE:-${AVAILABLE_INTERFACES[0]}}}
+
+        while ! printf '%s\n' "${AVAILABLE_INTERFACES[@]}" | grep -qx "$INTERFACE"; do
+            echo "Invalid interface: $INTERFACE"
+            read -p "Choose one of the listed interfaces: " INTERFACE
+        done
+    fi
     
     read -p "SSH port [22]: " SSH_PORT
     SSH_PORT=${SSH_PORT:-22}
@@ -92,13 +121,6 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         echo "Static IP address is required!"
         read -p "Static IP address: " STATIC_IP
     done
-
-    # Detect primary network interface
-    INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-    if [[ -z "$INTERFACE" ]]; then
-        echo "Could not detect network interface automatically."
-        read -p "Enter network interface name (e.g., enp86s0, eth0): " INTERFACE
-    fi
 
     echo ""
     echo "Configuration Summary:"
@@ -140,6 +162,9 @@ EOF
             sed -i "s/^#Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
         else
             echo "Port $SSH_PORT" >> /etc/ssh/sshd_config
+        fi
+        if command -v ufw >/dev/null 2>&1; then
+            ufw allow "$SSH_PORT"/tcp
         fi
 
         echo "[Network 4/6] Enabling and starting SSH service..."
@@ -290,7 +315,70 @@ else
 fi
 
 # ============================================
-# SECTION 4: DISK AUTO-DECRYPTION
+# SECTION 4: NEOVIM CONFIGURATION
+# ============================================
+
+echo ""
+read -p "Would you like to configure Neovim arrow-key line wrapping? [Y/n]: " CONFIGURE_NVIM
+CONFIGURE_NVIM=${CONFIGURE_NVIM:-Y}
+
+if [[ "$CONFIGURE_NVIM" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Neovim Configuration ==="
+    echo ""
+
+    NVIM_HOME=$(eval echo ~$PRIMARY_USER)
+    NVIM_CONFIG_DIR="$NVIM_HOME/.config/nvim"
+    NVIM_LUA_CONFIG_DIR="$NVIM_CONFIG_DIR/lua/config"
+    NVIM_OPTIONS_FILE="$NVIM_LUA_CONFIG_DIR/options.lua"
+    NVIM_KEYMAPS_FILE="$NVIM_LUA_CONFIG_DIR/keymaps.lua"
+
+    mkdir -p "$NVIM_LUA_CONFIG_DIR"
+
+    if [[ ! -f "$NVIM_OPTIONS_FILE" ]]; then
+        cat > "$NVIM_OPTIONS_FILE" <<'EOF'
+-- Options are automatically loaded before lazy.nvim startup
+-- Add any additional options here
+EOF
+    fi
+
+    if ! grep -Fq 'vim.opt.whichwrap:append("<,>,[,]")' "$NVIM_OPTIONS_FILE"; then
+        echo 'vim.opt.whichwrap:append("<,>,[,]")' >> "$NVIM_OPTIONS_FILE"
+        echo "✓ Enabled left/right arrow wrapping across line boundaries"
+    else
+        echo "✓ Left/right arrow wrapping is already configured"
+    fi
+
+    if [[ ! -f "$NVIM_KEYMAPS_FILE" ]]; then
+        cat > "$NVIM_KEYMAPS_FILE" <<'EOF'
+-- Keymaps are automatically loaded on the VeryLazy event
+-- Add any additional keymaps here
+EOF
+    fi
+
+    if ! grep -Fq 'Move down or to end of final line' "$NVIM_KEYMAPS_FILE"; then
+        cat >> "$NVIM_KEYMAPS_FILE" <<'EOF'
+vim.keymap.set("n", "<Down>", function()
+  if vim.fn.line(".") == vim.fn.line("$") then
+    return "$"
+  end
+
+  return "j"
+end, { expr = true, desc = "Move down or to end of final line" })
+EOF
+        echo "✓ Configured down arrow to move to the end of the final line"
+    else
+        echo "✓ Final-line down arrow behavior is already configured"
+    fi
+
+    chown -R $PRIMARY_USER:$PRIMARY_USER "$NVIM_CONFIG_DIR"
+    echo "✓ Neovim configuration updated for $PRIMARY_USER"
+else
+    echo "Neovim configuration skipped."
+fi
+
+# ============================================
+# SECTION 5: DISK AUTO-DECRYPTION
 # ============================================
 
 echo ""
@@ -431,13 +519,18 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 
                 echo ""
                 echo "[4/6] Adding keyfile to initramfs..."
-                # Update FILES array in mkinitcpio.conf
+                # Update FILES array in mkinitcpio.conf without clobbering existing entries
                 if grep -q "^FILES=(" "$MKINITCPIO_CONF"; then
-                    sed -i "s|^FILES=(.*)|FILES=($KEYFILE)|" "$MKINITCPIO_CONF"
+                    if grep -Fq "$KEYFILE" "$MKINITCPIO_CONF"; then
+                        echo "✓ Keyfile already present in mkinitcpio FILES"
+                    else
+                        sed -i "s|^FILES=(\\(.*\\))|FILES=(\\1 $KEYFILE)|" "$MKINITCPIO_CONF"
+                        echo "✓ Added keyfile to existing mkinitcpio FILES"
+                    fi
                 else
                     echo "FILES=($KEYFILE)" >> "$MKINITCPIO_CONF"
+                    echo "✓ Created mkinitcpio FILES with keyfile"
                 fi
-                echo "✓ Keyfile added to mkinitcpio FILES"
                 
                 echo ""
                 echo "[5/6] Updating kernel command line in Omarchy configuration..."
@@ -451,10 +544,18 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 if grep -q "cryptkey=" "$LIMINE_CONFIG"; then
                     echo "✓ cryptkey parameter already present in configuration"
                 else
-                    # Add cryptkey parameter to the first KERNEL_CMDLINE[default] line
-                    # Insert it right after the opening quote, before cryptdevice
-                    sed -i "0,/KERNEL_CMDLINE\[default\]=\"cryptdevice=/s|KERNEL_CMDLINE\[default\]=\"cryptdevice=|KERNEL_CMDLINE[default]=\"cryptkey=rootfs:$KEYFILE cryptdevice=|" "$LIMINE_CONFIG"
-                    echo "✓ Added cryptkey parameter to kernel command line"
+                    # Add cryptkey before cryptdevice in either:
+                    #   KERNEL_CMDLINE[default]="..."
+                    #   KERNEL_CMDLINE[default]+="..."
+                    if grep -q 'KERNEL_CMDLINE\[default\].*cryptdevice=' "$LIMINE_CONFIG"; then
+                        sed -i -E '0,/KERNEL_CMDLINE\[default\].*cryptdevice=/{s|(KERNEL_CMDLINE\[default\]\+?=")([^"]*?)cryptdevice=|\1\2cryptkey=rootfs:'"$KEYFILE"' cryptdevice=|}' "$LIMINE_CONFIG"
+                        echo "✓ Added cryptkey parameter to existing KERNEL_CMDLINE[default] entry"
+                    else
+                        # Fallback for newer layouts where cryptdevice may be elsewhere.
+                        # Add a standalone default cmdline append line.
+                        echo "KERNEL_CMDLINE[default]+=\"cryptkey=rootfs:$KEYFILE\"" >> "$LIMINE_CONFIG"
+                        echo "✓ Added cryptkey parameter as a new KERNEL_CMDLINE[default]+ entry"
+                    fi
                 fi
                 
                 # Also update /etc/kernel/cmdline for consistency (even though it's not used by Omarchy)
@@ -474,6 +575,10 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 else
                     mkinitcpio -P
                     echo "✓ Initramfs rebuilt"
+                fi
+                if command -v limine-update >/dev/null 2>&1; then
+                    limine-update
+                    echo "✓ Limine entries updated"
                 fi
                 
                 echo ""
