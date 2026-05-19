@@ -22,6 +22,10 @@ echo "  2. Install additional packages through the pacman package manager"
 echo "  3. Manage keybindings"
 echo "  4. Configure Neovim arrow-key line wrapping"
 echo "  5. Configure disk auto-decryption on boot (with options for mitigating security risk)"
+echo "  6. Configure headless boot (boot to text console; GUI launches on demand)"
+echo "  7. Disable system suspend/hibernate (recommended for unattended servers)"
+echo "  8. Enable persistent system journal logging"
+echo "  9. Install common AI workstation packages (Python, Docker, monitoring tools)"
 echo ""
 echo "Brought to you by Miles David Romney at V42 and The Chief Innovator:"
 echo "https://www.linkedin.com/in/miles-david-romney-8b11a4/"
@@ -910,6 +914,298 @@ else
 fi
 
 # ============================================
+# SECTION 6: HEADLESS BOOT MODE
+# ============================================
+
+echo ""
+read -p "Would you like to configure headless boot (boot to text console instead of GUI)? [Y/n]: " CONFIGURE_HEADLESS
+CONFIGURE_HEADLESS=${CONFIGURE_HEADLESS:-Y}
+
+if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Headless Boot Configuration ==="
+    echo ""
+    echo "This will configure the system to boot to a text console login on tty1,"
+    echo "rather than starting SDDM/Hyprland on boot."
+    echo ""
+    echo "After applying:"
+    echo "  - System boots to text console (tty1)"
+    echo "  - All GPU drivers (NVIDIA/AMD), CUDA, and ROCm remain fully available"
+    echo "  - To launch Hyprland on demand: type 'gui' at the console"
+    echo "  - To start SDDM on demand: 'sudo systemctl start sddm'"
+    echo ""
+    echo "This is recommended for AI workstation / server use, where you primarily"
+    echo "interact via SSH and don't need a desktop running 24/7."
+    echo ""
+    read -p "Apply headless boot mode? [Y/n]: " CONFIRM_HEADLESS
+    CONFIRM_HEADLESS=${CONFIRM_HEADLESS:-Y}
+
+    if [[ "$CONFIRM_HEADLESS" =~ ^[Yy]$ ]]; then
+        echo "[Headless 1/4] Backing up current default systemd target..."
+        CURRENT_TARGET=$(systemctl get-default)
+        echo "Current default target: $CURRENT_TARGET"
+        echo "$CURRENT_TARGET" > /etc/.previous-systemd-target.backup
+        echo "✓ Previous target saved to /etc/.previous-systemd-target.backup"
+
+        echo "[Headless 2/4] Setting default target to multi-user.target..."
+        systemctl set-default multi-user.target
+        echo "✓ Default target set to multi-user.target (text console)"
+
+        echo "[Headless 3/4] Disabling SDDM service on boot..."
+        if systemctl is-enabled sddm.service &>/dev/null; then
+            systemctl disable sddm.service
+            echo "✓ SDDM disabled (can still be started manually with 'sudo systemctl start sddm')"
+        else
+            echo "✓ SDDM was already disabled"
+        fi
+
+        # Ensure getty@tty1 is enabled (it normally is, but verify)
+        systemctl enable getty@tty1.service &>/dev/null
+        echo "✓ Console login on tty1 enabled"
+
+        echo "[Headless 4/4] Installing 'gui' convenience launcher for Hyprland..."
+        GUI_LAUNCHER="/usr/local/bin/gui"
+        cat > "$GUI_LAUNCHER" <<'GUI_EOF'
+#!/bin/bash
+# Launch Hyprland on demand from a TTY.
+# Hyprland's exec-once directives handle starting ancillary services
+# (pipewire, waybar, mako, etc.) automatically.
+
+if [[ -n "$WAYLAND_DISPLAY" ]] || [[ -n "$DISPLAY" ]]; then
+    echo "A GUI session appears to already be running."
+    echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY DISPLAY=$DISPLAY"
+    exit 1
+fi
+
+if [[ -z "$XDG_VTNR" ]] || [[ "$XDG_VTNR" -eq 0 ]]; then
+    echo "ERROR: 'gui' must be run from a physical TTY, not over SSH."
+    echo "If you need a GUI over the network, consider VNC, RDP, or x11vnc instead."
+    exit 1
+fi
+
+# Set up minimal Wayland environment
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=Hyprland
+export XDG_CURRENT_DESKTOP=Hyprland
+
+# Hand off to Hyprland
+exec Hyprland
+GUI_EOF
+        chmod +x "$GUI_LAUNCHER"
+        echo "✓ Created $GUI_LAUNCHER"
+
+        echo ""
+        echo "✓ Headless boot mode configured."
+        echo ""
+        echo "After reboot:"
+        echo "  • System will boot to text console login on tty1"
+        echo "  • Log in with username/password (or SSH from another machine)"
+        echo "  • To launch GUI: type 'gui' at the console"
+        echo "  • To re-enable graphical boot:"
+        echo "      sudo systemctl set-default graphical.target"
+        echo "      sudo systemctl enable sddm.service"
+    else
+        echo "Headless boot configuration skipped."
+        CONFIGURE_HEADLESS="N"
+    fi
+else
+    echo "Headless boot configuration skipped."
+fi
+
+# ============================================
+# SECTION 7: DISABLE SUSPEND/HIBERNATE
+# ============================================
+
+echo ""
+read -p "Would you like to disable system suspend/hibernate? Recommended for unattended servers. [Y/n]: " DISABLE_SUSPEND
+DISABLE_SUSPEND=${DISABLE_SUSPEND:-Y}
+
+if [[ "$DISABLE_SUSPEND" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Disabling Suspend/Hibernate ==="
+    echo ""
+    echo "This prevents the system from sleeping during long-running operations"
+    echo "(training runs, batch inference, scheduled jobs, etc.)."
+    echo ""
+
+    systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+    echo "✓ Suspend, hibernate, and hybrid-sleep targets masked"
+
+    # Also configure logind to not act on lid close (for laptops repurposed as servers)
+    LOGIND_CONF="/etc/systemd/logind.conf.d/headless-server.conf"
+    mkdir -p /etc/systemd/logind.conf.d
+    cat > "$LOGIND_CONF" <<'LOGIND_EOF'
+# Headless server configuration: ignore power button and lid events
+# Prevents accidental shutdown/sleep on hardware that has these
+[Login]
+HandlePowerKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchDocked=ignore
+HandleLidSwitchExternalPower=ignore
+IdleAction=ignore
+LOGIND_EOF
+    systemctl restart systemd-logind &>/dev/null || true
+    echo "✓ logind configured to ignore power/lid events"
+
+    echo ""
+    echo "✓ System will no longer suspend, hibernate, or respond to power/lid events."
+    echo ""
+    echo "To revert:"
+    echo "  sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target"
+    echo "  sudo rm $LOGIND_CONF"
+    echo "  sudo systemctl restart systemd-logind"
+else
+    echo "Suspend/hibernate left enabled."
+fi
+
+# ============================================
+# SECTION 8: PERSISTENT JOURNAL LOGGING
+# ============================================
+
+echo ""
+read -p "Would you like to enable persistent system journal logging? Useful for debugging crashes that survive reboot. [Y/n]: " ENABLE_PERSISTENT_LOGS
+ENABLE_PERSISTENT_LOGS=${ENABLE_PERSISTENT_LOGS:-Y}
+
+if [[ "$ENABLE_PERSISTENT_LOGS" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Persistent Journal Configuration ==="
+    echo ""
+    echo "By default, systemd-journald logs to /run/log/journal (volatile, lost on reboot)."
+    echo "This configures it to log to /var/log/journal instead, retained across reboots."
+    echo "Logs are capped at 2GB total to prevent unbounded disk usage."
+    echo ""
+
+    # Create the persistent journal directory
+    mkdir -p /var/log/journal
+    systemd-tmpfiles --create --prefix /var/log/journal &>/dev/null
+
+    # Configure retention limits
+    JOURNAL_CONF="/etc/systemd/journald.conf.d/persistent.conf"
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > "$JOURNAL_CONF" <<'JOURNAL_EOF'
+# Persistent journal with bounded disk usage
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+SystemKeepFree=2G
+SystemMaxFileSize=128M
+MaxRetentionSec=1month
+JOURNAL_EOF
+
+    systemctl restart systemd-journald
+    echo "✓ Persistent journal enabled (max 2GB, 1-month retention)"
+    echo ""
+    echo "Useful commands:"
+    echo "  journalctl -b               # Logs from current boot"
+    echo "  journalctl -b -1            # Logs from previous boot"
+    echo "  journalctl --list-boots     # List all boots in journal"
+    echo "  journalctl --disk-usage     # Show current journal size"
+else
+    echo "Journal kept at default (volatile/ephemeral) configuration."
+fi
+
+# ============================================
+# SECTION 9: AI WORKSTATION PACKAGES
+# ============================================
+
+echo ""
+read -p "Would you like to install additional AI workstation packages? (Python tooling, monitoring, etc.) [y/N]: " INSTALL_AI_PACKAGES
+INSTALL_AI_PACKAGES=${INSTALL_AI_PACKAGES:-N}
+
+if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Installing AI Workstation Packages ==="
+    echo ""
+    echo "This will install packages commonly needed for AI work that are NOT already"
+    echo "shipped with Omarchy's base install."
+    echo ""
+    echo "Already provided by Omarchy (will NOT be reinstalled):"
+    echo "  Python (via base deps), git, btop, tmux, jq, docker, docker-compose"
+    echo "  (Omarchy also pre-configures docker group membership for your user.)"
+    echo ""
+    echo "Additional packages to install:"
+    echo ""
+    echo "  Python ecosystem (beyond what Omarchy ships):"
+    echo "    python-pip python-virtualenv python-pipx"
+    echo ""
+    echo "  Build tools:"
+    echo "    base-devel  (gcc, make, autotools — needed to build Python wheels"
+    echo "                 with native components, e.g., flash-attn, bitsandbytes)"
+    echo ""
+    echo "  Monitoring (beyond btop):"
+    echo "    nvtop       (real-time NVIDIA GPU monitoring)"
+    echo "    iotop       (per-process disk I/O monitoring)"
+    echo "    htop        (some prefer over btop)"
+    echo "    lm_sensors  (CPU/motherboard temperature reading)"
+    echo "    smartmontools (SSD health monitoring; smartctl)"
+    echo ""
+    echo "  Utilities:"
+    echo "    rsync       (efficient file sync, useful for moving model files)"
+    echo "    mosh        (resilient SSH replacement; survives network drops)"
+    echo ""
+    read -p "Proceed with installation? [Y/n]: " CONFIRM_AI_PACKAGES
+    CONFIRM_AI_PACKAGES=${CONFIRM_AI_PACKAGES:-Y}
+
+    if [[ "$CONFIRM_AI_PACKAGES" =~ ^[Yy]$ ]]; then
+        echo "Installing packages (this may take a few minutes)..."
+        pacman -S --needed --noconfirm \
+            python-pip python-virtualenv python-pipx \
+            base-devel \
+            nvtop iotop htop \
+            lm_sensors smartmontools \
+            rsync mosh
+
+        if [[ $? -eq 0 ]]; then
+            echo "✓ Packages installed"
+        else
+            echo "⚠ Some packages may have failed; check output above"
+        fi
+
+        # Verify docker is functional (Omarchy should have done this, but verify)
+        echo ""
+        echo "Verifying Docker configuration (Omarchy normally handles this)..."
+        if systemctl is-enabled docker.service &>/dev/null; then
+            echo "✓ Docker service is enabled"
+        else
+            echo "Docker service not enabled; enabling now..."
+            systemctl enable docker.service
+            echo "✓ Docker service enabled"
+        fi
+
+        if groups "$PRIMARY_USER" | grep -q docker; then
+            echo "✓ $PRIMARY_USER is in docker group"
+        else
+            echo "$PRIMARY_USER not in docker group; adding..."
+            usermod -aG docker "$PRIMARY_USER"
+            echo "✓ Added $PRIMARY_USER to docker group (log out/in to take effect)"
+        fi
+
+        echo ""
+        echo "✓ AI workstation packages configured."
+        echo ""
+        echo "Quick references:"
+        echo "  Python isolated environments:"
+        echo "    python -m venv ~/.venvs/myenv && source ~/.venvs/myenv/bin/activate"
+        echo "    pipx install <tool>          # for CLI tools in isolation"
+        echo "  GPU monitoring:"
+        echo "    nvtop                        # NVIDIA GPUs (interactive)"
+        echo "    nvidia-smi -l 1              # NVIDIA, refreshing every second"
+        echo "  System monitoring:"
+        echo "    btop                         # general system (Omarchy default)"
+        echo "    iotop                        # disk I/O per process"
+        echo "    sensors                      # CPU/board temps (run sensors-detect first)"
+        echo "    smartctl -a /dev/nvme0       # SSD health"
+        echo "  Resilient remote sessions:"
+        echo "    mosh user@host               # SSH replacement that survives reconnects"
+    else
+        echo "AI workstation packages skipped."
+        INSTALL_AI_PACKAGES="N"
+    fi
+else
+    echo "AI workstation packages skipped."
+fi
+
+# ============================================
 # FINAL SUMMARY
 # ============================================
 
@@ -928,8 +1224,23 @@ fi
 if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     echo "  ✓ Keybindings swapped (SUPER ↔ ALT)"
 fi
+if [[ "$CONFIGURE_NVIM" =~ ^[Yy]$ ]]; then
+    echo "  ✓ Neovim arrow-key behavior configured"
+fi
 if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
     echo "  ✓ Disk auto-decryption configured"
+fi
+if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
+    echo "  ✓ Headless boot configured (boots to console; 'gui' launches Hyprland)"
+fi
+if [[ "$DISABLE_SUSPEND" =~ ^[Yy]$ ]]; then
+    echo "  ✓ Suspend/hibernate disabled"
+fi
+if [[ "$ENABLE_PERSISTENT_LOGS" =~ ^[Yy]$ ]]; then
+    echo "  ✓ Persistent journal logging enabled"
+fi
+if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
+    echo "  ✓ AI workstation packages installed"
 fi
 echo ""
 read -p "Would you like to reboot now to apply all changes? [y/N]: " REBOOT_NOW
