@@ -75,6 +75,167 @@ echo "Using primary user: $PRIMARY_USER"
 echo ""
 
 # ============================================
+# HYPRLAND AUTO-LOCK HELPERS
+# Support legacy hyprland.conf (hyprlang) and modern hyprland.lua (0.55+/0.57)
+# ============================================
+
+HYPR_AUTOLOCK_CONF_MARKER="# Auto-lock screen after autologin for security"
+HYPR_AUTOLOCK_CONF_LINE="exec-once = sleep 3 && hyprlock"
+HYPR_AUTOLOCK_LUA_MARKER="-- Auto-lock screen after autologin for security"
+HYPR_AUTOLOCK_LUA_END_MARKER="-- End Auto-lock screen after autologin for security"
+HYPR_AUTOLOCK_CMD="sleep 3 && hyprlock"
+HYPR_AUTOLOCK_LUA_EXEC='hl.exec_cmd("sleep 3 && hyprlock")'
+
+# Strip our marked auto-lock block from a hyprland.lua file (idempotent).
+hypr_strip_autolock_lua() {
+    local lua_config="$1"
+    local tmp_file
+
+    [[ -f "$lua_config" ]] || return 0
+
+    tmp_file=$(mktemp)
+    awk -v start="$HYPR_AUTOLOCK_LUA_MARKER" -v end="$HYPR_AUTOLOCK_LUA_END_MARKER" '
+        $0 == start { in_block = 1; next }
+        in_block && $0 == end { in_block = 0; next }
+        in_block { next }
+        { print }
+    ' "$lua_config" > "$tmp_file"
+    mv "$tmp_file" "$lua_config"
+}
+
+# Write/replace the marked auto-lock block in a hyprland.lua file.
+hypr_write_autolock_lua() {
+    local lua_config="$1"
+    local tmp_file
+
+    if [[ -f "$lua_config" ]]; then
+        hypr_strip_autolock_lua "$lua_config"
+        tmp_file=$(mktemp)
+        cat "$lua_config" > "$tmp_file"
+        if [[ -s "$tmp_file" ]]; then
+            # Ensure exactly one trailing newline, then a blank separator line.
+            if [[ -n "$(tail -c 1 "$tmp_file" 2>/dev/null)" ]]; then
+                printf '\n' >> "$tmp_file"
+            fi
+            printf '\n' >> "$tmp_file"
+        fi
+    else
+        tmp_file=$(mktemp)
+        : > "$tmp_file"
+    fi
+
+    cat >> "$tmp_file" <<LUA_EOF
+${HYPR_AUTOLOCK_LUA_MARKER}
+hl.on("hyprland.start", function ()
+  hl.exec_cmd("${HYPR_AUTOLOCK_CMD}")
+end)
+${HYPR_AUTOLOCK_LUA_END_MARKER}
+LUA_EOF
+
+    mv "$tmp_file" "$lua_config"
+}
+
+# Write/replace the marked auto-lock lines in a hyprland.conf file.
+hypr_write_autolock_conf() {
+    local conf_config="$1"
+
+    if [[ -f "$conf_config" ]]; then
+        if [[ ! -f "${conf_config}.backup" ]]; then
+            cp "$conf_config" "${conf_config}.backup"
+        fi
+        # Remove any existing autolock entries first (idempotent).
+        sed -i '\|# Auto-lock screen after autologin for security|d' "$conf_config"
+        sed -i '/exec-once.*hyprlock/d' "$conf_config"
+        if [[ -s "$conf_config" ]]; then
+            if [[ -n "$(tail -c 1 "$conf_config" 2>/dev/null)" ]]; then
+                printf '\n' >> "$conf_config"
+            fi
+            printf '\n' >> "$conf_config"
+        fi
+    fi
+
+    {
+        echo "$HYPR_AUTOLOCK_CONF_MARKER"
+        echo "$HYPR_AUTOLOCK_CONF_LINE"
+    } >> "$conf_config"
+}
+
+# Add auto-lock to hyprland.conf and/or hyprland.lua for the given user home.
+# Dual-writes when safe so older Hyprland (conf) and 0.55+/0.57 (lua) both work.
+hypr_add_autolock() {
+    local user_home="$1"
+    local hypr_dir="$user_home/.config/hypr"
+    local conf_config="$hypr_dir/hyprland.conf"
+    local lua_config="$hypr_dir/hyprland.lua"
+    local conf_exists=false
+    local lua_exists=false
+    local touch_conf=false
+    local touch_lua=false
+
+    mkdir -p "$hypr_dir"
+
+    [[ -f "$conf_config" ]] && conf_exists=true
+    [[ -f "$lua_config" ]] && lua_exists=true
+
+    if [[ "$conf_exists" == true && "$lua_exists" == true ]]; then
+        touch_conf=true
+        touch_lua=true
+    elif [[ "$lua_exists" == true ]]; then
+        # Lua takes precedence when present; conf would be ignored by Hyprland.
+        touch_lua=true
+    elif [[ "$conf_exists" == true ]]; then
+        # Keep conf working on older Hyprland; also write companion lua for 0.57.
+        touch_conf=true
+        touch_lua=true
+    else
+        # Minimal create path: both formats for broad compatibility.
+        touch_conf=true
+        touch_lua=true
+    fi
+
+    if [[ "$touch_conf" == true ]]; then
+        hypr_write_autolock_conf "$conf_config"
+        echo "✓ Added hyprlock autostart to Hyprland conf ($conf_config)"
+    fi
+
+    if [[ "$touch_lua" == true ]]; then
+        if [[ -f "$lua_config" && ! -f "${lua_config}.backup" ]]; then
+            cp "$lua_config" "${lua_config}.backup"
+        fi
+        hypr_write_autolock_lua "$lua_config"
+        echo "✓ Added hyprlock autostart to Hyprland lua ($lua_config)"
+    fi
+}
+
+# Remove auto-lock markers from both conf and lua if present.
+hypr_remove_autolock() {
+    local user_home="$1"
+    local hypr_dir="$user_home/.config/hypr"
+    local conf_config="$hypr_dir/hyprland.conf"
+    local lua_config="$hypr_dir/hyprland.lua"
+    local removed=false
+
+    if [[ -f "$conf_config" ]]; then
+        if grep -qF -- "$HYPR_AUTOLOCK_CONF_MARKER" "$conf_config" || grep -q 'exec-once.*hyprlock' "$conf_config"; then
+            sed -i '\|# Auto-lock screen after autologin for security|d' "$conf_config"
+            sed -i '/exec-once.*hyprlock/d' "$conf_config"
+            removed=true
+        fi
+    fi
+
+    if [[ -f "$lua_config" ]]; then
+        if grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config" || grep -qF -- "$HYPR_AUTOLOCK_LUA_EXEC" "$lua_config"; then
+            hypr_strip_autolock_lua "$lua_config"
+            removed=true
+        fi
+    fi
+
+    if [[ "$removed" == true ]]; then
+        echo "✓ Removed auto-lock from Hyprland config"
+    fi
+}
+
+# ============================================
 # SECTION 1: NETWORK CONFIGURATION
 # ============================================
 
@@ -706,40 +867,14 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                             echo "No .conf files found in /etc/sddm.conf.d/"
                         fi
                         
-                        # Create Hyprland config directory if needed
-                        mkdir -p "$USER_HOME/.config/hypr"
-                        
                         # Check if hyprlock is installed
                         if ! command -v hyprlock >/dev/null 2>&1; then
                             echo "⚠ Warning: hyprlock not found. Installing..."
                             pacman -S --needed --noconfirm hyprlock hypridle
                         fi
                         
-                        # Add autolock to Hyprland config
-                        HYPR_CONFIG="$USER_HOME/.config/hypr/hyprland.conf"
-                        if [[ -f "$HYPR_CONFIG" ]]; then
-                            # Backup the config if not already backed up
-                            if [[ ! -f "${HYPR_CONFIG}.backup" ]]; then
-                                cp "$HYPR_CONFIG" "${HYPR_CONFIG}.backup"
-                            fi
-                            
-                            # Remove any existing autolock entries first
-                            sed -i '/# Auto-lock screen after autologin for security/d' "$HYPR_CONFIG"
-                            sed -i '/exec-once.*hyprlock/d' "$HYPR_CONFIG"
-                            
-                            # Add exec-once at the end of the config
-                            echo "" >> "$HYPR_CONFIG"
-                            echo "# Auto-lock screen after autologin for security" >> "$HYPR_CONFIG"
-                            echo "exec-once = sleep 3 && hyprlock" >> "$HYPR_CONFIG"
-                            echo "✓ Added hyprlock autostart to Hyprland config"
-                        else
-                            echo "⚠ Hyprland config not found at $HYPR_CONFIG"
-                            echo "  Creating minimal config with autolock..."
-                            cat > "$HYPR_CONFIG" <<'HYPR_EOF'
-# Auto-lock screen after autologin for security
-exec-once = sleep 3 && hyprlock
-HYPR_EOF
-                        fi
+                        # Add autolock to Hyprland config (legacy conf + modern lua)
+                        hypr_add_autolock "$USER_HOME"
                         
                         chown -R $AUTOLOGIN_USER:$AUTOLOGIN_USER "$USER_HOME/.config/hypr"
                         
@@ -760,16 +895,8 @@ HYPR_EOF
                         AUTOLOGIN_USER=$(grep -h "^User=\|^#User=" /etc/sddm.conf.d/*.conf /etc/sddm.conf.d/*.disabled /etc/sddm.conf 2>/dev/null | head -n1 | sed 's/^#//' | cut -d= -f2)
                         if [[ -n "$AUTOLOGIN_USER" ]]; then
                             USER_HOME=$(eval echo ~$AUTOLOGIN_USER)
-                            HYPR_CONFIG="$USER_HOME/.config/hypr/hyprland.conf"
-                            
-                            # Remove autolock from Hyprland config if it exists
-                            if [[ -f "$HYPR_CONFIG" ]]; then
-                                if grep -q "exec-once.*hyprlock" "$HYPR_CONFIG"; then
-                                    sed -i '/# Auto-lock screen after autologin for security/d' "$HYPR_CONFIG"
-                                    sed -i '/exec-once.*hyprlock/d' "$HYPR_CONFIG"
-                                    echo "✓ Removed auto-lock from Hyprland config"
-                                fi
-                            fi
+                            # Remove autolock from Hyprland conf + lua if present
+                            hypr_remove_autolock "$USER_HOME"
                         fi
                         
                         # Disable autologin by renaming config files in /etc/sddm.conf.d/
@@ -834,7 +961,6 @@ SDDM_CONF_EOF
                         fi
                         
                         USER_HOME=$(eval echo ~$AUTOLOGIN_USER)
-                        HYPR_CONFIG="$USER_HOME/.config/hypr/hyprland.conf"
                         
                         SDDM_CHANGED=false
                         
@@ -874,14 +1000,8 @@ SDDM_CONF_EOF
                             done
                         fi
                         
-                        # Remove autolock from Hyprland config if it exists
-                        if [[ -f "$HYPR_CONFIG" ]]; then
-                            if grep -q "exec-once.*hyprlock" "$HYPR_CONFIG"; then
-                                sed -i '/# Auto-lock screen after autologin for security/d' "$HYPR_CONFIG"
-                                sed -i '/exec-once.*hyprlock/d' "$HYPR_CONFIG"
-                                echo "✓ Removed auto-lock from Hyprland config"
-                            fi
-                        fi
+                        # Remove autolock from Hyprland conf + lua if present
+                        hypr_remove_autolock "$USER_HOME"
                         
                         echo "⚠ No security protections active."
                         echo "Your system will boot directly to the desktop without authentication."
