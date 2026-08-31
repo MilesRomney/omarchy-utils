@@ -74,166 +74,403 @@ fi
 echo "Using primary user: $PRIMARY_USER"
 echo ""
 
-# ============================================
-# HYPRLAND AUTO-LOCK HELPERS
-# Support legacy hyprland.conf (hyprlang) and modern hyprland.lua (0.55+/0.57)
-# ============================================
-
+# >>> HYPR AUTOLOCK LIB >>>
 HYPR_AUTOLOCK_CONF_MARKER="# Auto-lock screen after autologin for security"
-HYPR_AUTOLOCK_CONF_LINE="exec-once = sleep 3 && hyprlock"
+HYPR_AUTOLOCK_CONF_END_MARKER="# End Auto-lock screen after autologin for security"
 HYPR_AUTOLOCK_LUA_MARKER="-- Auto-lock screen after autologin for security"
 HYPR_AUTOLOCK_LUA_END_MARKER="-- End Auto-lock screen after autologin for security"
-HYPR_AUTOLOCK_CMD="sleep 3 && hyprlock"
-HYPR_AUTOLOCK_LUA_EXEC='hl.exec_cmd("sleep 3 && hyprlock")'
+HYPR_AUTOLOCK_LEGACY_COMMAND="hyprlock"
 
-# Strip our marked auto-lock block from a hyprland.lua file (idempotent).
-hypr_strip_autolock_lua() {
+hypr_set_file_metadata() {
+    local target="$1"
+    local owner="$2"
+    local owner_group
+
+    if ! chmod 0644 "$target"; then
+        echo "⚠ Error: Could not set safe permissions on $target" >&2
+        return 1
+    fi
+
+    if ! owner_group=$(id -gn "$owner" 2>/dev/null); then
+        echo "⚠ Error: Could not determine the primary group for user '$owner'" >&2
+        return 1
+    fi
+
+    if ! chown "$owner:$owner_group" "$target" 2>/dev/null; then
+        if [[ "$(id -un)" != "$owner" ]]; then
+            echo "⚠ Error: Could not set ownership of $target to '$owner'" >&2
+            return 1
+        fi
+    fi
+}
+
+hypr_make_backup() {
+    local target="$1"
+    local owner="$2"
+
+    [[ -f "$target" ]] || return 0
+    if ! cp "$target" "${target}.backup"; then
+        echo "⚠ Error: Could not back up $target" >&2
+        return 1
+    fi
+    hypr_set_file_metadata "${target}.backup" "$owner"
+}
+
+hypr_restore_backup() {
+    local target="$1"
+    local owner="$2"
+    local existed_before="$3"
+
+    if [[ "$existed_before" == true && -f "${target}.backup" ]]; then
+        if ! cp "${target}.backup" "$target"; then
+            echo "⚠ Error: Could not restore $target from its backup" >&2
+            return 1
+        fi
+        hypr_set_file_metadata "$target" "$owner"
+    else
+        rm -f "$target"
+    fi
+}
+
+hypr_filter_autolock_lua() {
     local lua_config="$1"
-    local tmp_file
+    local start_count
+    local end_count
 
-    [[ -f "$lua_config" ]] || return 0
+    start_count=$(grep -cF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config" || true)
+    end_count=$(grep -cF -- "$HYPR_AUTOLOCK_LUA_END_MARKER" "$lua_config" || true)
+    if [[ "$start_count" -ne "$end_count" ]]; then
+        echo "⚠ Error: Refusing to edit malformed auto-lock markers in $lua_config" >&2
+        return 1
+    fi
 
-    tmp_file=$(mktemp)
     awk -v start="$HYPR_AUTOLOCK_LUA_MARKER" -v end="$HYPR_AUTOLOCK_LUA_END_MARKER" '
         $0 == start { in_block = 1; next }
         in_block && $0 == end { in_block = 0; next }
         in_block { next }
         { print }
-    ' "$lua_config" > "$tmp_file"
-    mv "$tmp_file" "$lua_config"
+    ' "$lua_config"
 }
 
-# Write/replace the marked auto-lock block in a hyprland.lua file.
-hypr_write_autolock_lua() {
+hypr_filter_autolock_conf() {
+    local conf_config="$1"
+    local start_count
+    local end_count
+    local has_end=false
+
+    start_count=$(grep -cF -- "$HYPR_AUTOLOCK_CONF_MARKER" "$conf_config" || true)
+    end_count=$(grep -cF -- "$HYPR_AUTOLOCK_CONF_END_MARKER" "$conf_config" || true)
+    if [[ "$end_count" -gt 0 && "$start_count" -ne "$end_count" ]]; then
+        echo "⚠ Error: Refusing to edit malformed auto-lock markers in $conf_config" >&2
+        return 1
+    fi
+    [[ "$end_count" -gt 0 ]] && has_end=true
+
+    awk -v start="$HYPR_AUTOLOCK_CONF_MARKER" -v end="$HYPR_AUTOLOCK_CONF_END_MARKER" -v has_end="$has_end" '
+        has_end == "true" && $0 == start { in_block = 1; next }
+        has_end == "true" && in_block && $0 == end { in_block = 0; next }
+        has_end == "true" && in_block { next }
+        has_end != "true" && ($0 == start || $0 == end) { next }
+        $0 ~ "exec-once.*" legacy_command { next }
+        { print }
+    ' legacy_command="$HYPR_AUTOLOCK_LEGACY_COMMAND" "$conf_config"
+}
+
+hypr_strip_autolock_lua() {
     local lua_config="$1"
+    local owner="$2"
     local tmp_file
 
-    if [[ -f "$lua_config" ]]; then
-        hypr_strip_autolock_lua "$lua_config"
-        tmp_file=$(mktemp)
-        cat "$lua_config" > "$tmp_file"
-        if [[ -s "$tmp_file" ]]; then
-            # Ensure exactly one trailing newline, then a blank separator line.
-            if [[ -n "$(tail -c 1 "$tmp_file" 2>/dev/null)" ]]; then
-                printf '\n' >> "$tmp_file"
-            fi
-            printf '\n' >> "$tmp_file"
-        fi
-    else
-        tmp_file=$(mktemp)
-        : > "$tmp_file"
+    [[ -f "$lua_config" ]] || return 0
+    if ! tmp_file=$(mktemp "$(dirname "$lua_config")/.hypr-autolock.XXXXXX"); then
+        echo "⚠ Error: Could not create a temporary file beside $lua_config" >&2
+        return 1
     fi
-
-    cat >> "$tmp_file" <<LUA_EOF
-${HYPR_AUTOLOCK_LUA_MARKER}
-hl.on("hyprland.start", function ()
-  hl.exec_cmd("${HYPR_AUTOLOCK_CMD}")
-end)
-${HYPR_AUTOLOCK_LUA_END_MARKER}
-LUA_EOF
-
-    mv "$tmp_file" "$lua_config"
+    if ! hypr_filter_autolock_lua "$lua_config" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$lua_config"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not safely update $lua_config" >&2
+        return 1
+    fi
 }
 
-# Write/replace the marked auto-lock lines in a hyprland.conf file.
+hypr_strip_autolock_conf() {
+    local conf_config="$1"
+    local owner="$2"
+    local tmp_file
+
+    [[ -f "$conf_config" ]] || return 0
+    if ! tmp_file=$(mktemp "$(dirname "$conf_config")/.hypr-autolock.XXXXXX"); then
+        echo "⚠ Error: Could not create a temporary file beside $conf_config" >&2
+        return 1
+    fi
+    if ! hypr_filter_autolock_conf "$conf_config" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$conf_config"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not safely update $conf_config" >&2
+        return 1
+    fi
+}
+
+hypr_repair_autolock_stub() {
+    local user_home="$1"
+    local owner="$2"
+    local lua_config="$user_home/.config/hypr/hyprland.lua"
+    local tmp_file
+    local meaningful=false
+
+    [[ -f "$lua_config" ]] || return 0
+    grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config" || return 0
+
+    if ! tmp_file=$(mktemp "$(dirname "$lua_config")/.hypr-autolock.XXXXXX"); then
+        echo "⚠ Error: Could not inspect $lua_config for auto-lock stub damage" >&2
+        return 1
+    fi
+    if ! hypr_filter_autolock_lua "$lua_config" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if grep -Eq 'bootstrap\.lua|require[[:space:]]*\(|dofile[[:space:]]*\(' "$tmp_file"; then
+        meaningful=true
+    elif awk '
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*--/ { next }
+        { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$tmp_file"; then
+        meaningful=true
+    fi
+
+    if [[ "$meaningful" == false ]]; then
+        rm -f "$tmp_file" "$lua_config" "${lua_config}.backup"
+        echo "⚠ REPAIR: Removed a broken auto-lock-only hyprland.lua stub."
+        echo "⚠ REPAIR: Hyprland can now load hyprland.conf again, restoring the user's desktop configuration."
+        return 0
+    fi
+
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$lua_config"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not remove the old auto-lock block from $lua_config" >&2
+        return 1
+    fi
+}
+
+hypr_resolve_lock_command() {
+    if [[ -n "${HYPR_LOCK_CMD_OVERRIDE:-}" ]]; then
+        printf '%s\n' "$HYPR_LOCK_CMD_OVERRIDE"
+    elif command -v omarchy-system-lock >/dev/null 2>&1; then
+        printf '%s\n' "omarchy-system-lock"
+    elif command -v hyprlock >/dev/null 2>&1; then
+        printf '%s\n' "hyprlock"
+    else
+        echo "⚠ Neither Omarchy's lock command nor hyprlock was found; installing the fallback..." >&2
+        if ! pacman -S --needed --noconfirm hyprlock hypridle >&2; then
+            echo "⚠ Error: Could not install the fallback screen locker" >&2
+            return 1
+        fi
+        printf '%s\n' "hyprlock"
+    fi
+}
+
+hypr_write_autolock_lua() {
+    local lua_config="$1"
+    local owner="$2"
+    local api_style="$3"
+    local lock_command="$4"
+    local tmp_file
+    local lua_command
+
+    if [[ "$(basename "$lua_config")" == "hyprland.lua" && ! -f "$lua_config" ]]; then
+        echo "⚠ Error: Refusing to create a new hyprland.lua entrypoint" >&2
+        return 1
+    fi
+    if ! hypr_make_backup "$lua_config" "$owner"; then
+        return 1
+    fi
+    if ! tmp_file=$(mktemp "$(dirname "$lua_config")/.hypr-autolock.XXXXXX"); then
+        echo "⚠ Error: Could not create a temporary file beside $lua_config" >&2
+        return 1
+    fi
+    if [[ -f "$lua_config" ]]; then
+        if ! hypr_filter_autolock_lua "$lua_config" > "$tmp_file"; then
+            rm -f "$tmp_file"
+            return 1
+        fi
+    fi
+
+    lua_command=${lock_command//\\/\\\\}
+    lua_command=${lua_command//\"/\\\"}
+    {
+        printf '%s\n' "$HYPR_AUTOLOCK_LUA_MARKER"
+        if [[ "$api_style" == omarchy ]]; then
+            printf 'o.exec_on_start("sleep 3 && %s")\n' "$lua_command"
+        else
+            printf 'hl.on("hyprland.start", function() hl.exec_cmd("sleep 3 && %s") end)\n' "$lua_command"
+        fi
+        printf '%s\n' "$HYPR_AUTOLOCK_LUA_END_MARKER"
+    } >> "$tmp_file"
+
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$lua_config"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not safely update $lua_config" >&2
+        return 1
+    fi
+}
+
 hypr_write_autolock_conf() {
     local conf_config="$1"
+    local owner="$2"
+    local lock_command="$3"
+    local tmp_file
 
-    if [[ -f "$conf_config" ]]; then
-        if [[ ! -f "${conf_config}.backup" ]]; then
-            cp "$conf_config" "${conf_config}.backup"
-        fi
-        # Remove any existing autolock entries first (idempotent).
-        sed -i '\|# Auto-lock screen after autologin for security|d' "$conf_config"
-        sed -i '/exec-once.*hyprlock/d' "$conf_config"
-        if [[ -s "$conf_config" ]]; then
-            if [[ -n "$(tail -c 1 "$conf_config" 2>/dev/null)" ]]; then
-                printf '\n' >> "$conf_config"
-            fi
-            printf '\n' >> "$conf_config"
-        fi
+    if ! hypr_make_backup "$conf_config" "$owner"; then
+        return 1
     fi
-
+    if ! tmp_file=$(mktemp "$(dirname "$conf_config")/.hypr-autolock.XXXXXX"); then
+        echo "⚠ Error: Could not create a temporary file beside $conf_config" >&2
+        return 1
+    fi
+    if ! hypr_filter_autolock_conf "$conf_config" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
     {
-        echo "$HYPR_AUTOLOCK_CONF_MARKER"
-        echo "$HYPR_AUTOLOCK_CONF_LINE"
-    } >> "$conf_config"
+        printf '%s\n' "$HYPR_AUTOLOCK_CONF_MARKER"
+        printf 'exec-once = sleep 3 && %s\n' "$lock_command"
+        printf '%s\n' "$HYPR_AUTOLOCK_CONF_END_MARKER"
+    } >> "$tmp_file"
+
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$conf_config"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not safely update $conf_config" >&2
+        return 1
+    fi
 }
 
-# Add auto-lock to hyprland.conf and/or hyprland.lua for the given user home.
-# Dual-writes when safe so older Hyprland (conf) and 0.55+/0.57 (lua) both work.
 hypr_add_autolock() {
     local user_home="$1"
+    local owner="$2"
     local hypr_dir="$user_home/.config/hypr"
     local conf_config="$hypr_dir/hyprland.conf"
     local lua_config="$hypr_dir/hyprland.lua"
-    local conf_exists=false
-    local lua_exists=false
-    local touch_conf=false
-    local touch_lua=false
+    local target
+    local api_style
+    local lock_command
+    local target_existed=false
+    local had_bootstrap=false
+    local had_omarchy=false
 
-    mkdir -p "$hypr_dir"
-
-    [[ -f "$conf_config" ]] && conf_exists=true
-    [[ -f "$lua_config" ]] && lua_exists=true
-
-    if [[ "$conf_exists" == true && "$lua_exists" == true ]]; then
-        touch_conf=true
-        touch_lua=true
-    elif [[ "$lua_exists" == true ]]; then
-        # Lua takes precedence when present; conf would be ignored by Hyprland.
-        touch_lua=true
-    elif [[ "$conf_exists" == true ]]; then
-        # Keep conf working on older Hyprland; also write companion lua for 0.57.
-        touch_conf=true
-        touch_lua=true
-    else
-        # Minimal create path: both formats for broad compatibility.
-        touch_conf=true
-        touch_lua=true
-    fi
-
-    if [[ "$touch_conf" == true ]]; then
-        hypr_write_autolock_conf "$conf_config"
-        echo "✓ Added hyprlock autostart to Hyprland conf ($conf_config)"
-    fi
-
-    if [[ "$touch_lua" == true ]]; then
-        if [[ -f "$lua_config" && ! -f "${lua_config}.backup" ]]; then
-            cp "$lua_config" "${lua_config}.backup"
-        fi
-        hypr_write_autolock_lua "$lua_config"
-        echo "✓ Added hyprlock autostart to Hyprland lua ($lua_config)"
-    fi
-}
-
-# Remove auto-lock markers from both conf and lua if present.
-hypr_remove_autolock() {
-    local user_home="$1"
-    local hypr_dir="$user_home/.config/hypr"
-    local conf_config="$hypr_dir/hyprland.conf"
-    local lua_config="$hypr_dir/hyprland.lua"
-    local removed=false
-
-    if [[ -f "$conf_config" ]]; then
-        if grep -qF -- "$HYPR_AUTOLOCK_CONF_MARKER" "$conf_config" || grep -q 'exec-once.*hyprlock' "$conf_config"; then
-            sed -i '\|# Auto-lock screen after autologin for security|d' "$conf_config"
-            sed -i '/exec-once.*hyprlock/d' "$conf_config"
-            removed=true
-        fi
+    if ! hypr_repair_autolock_stub "$user_home" "$owner"; then
+        return 1
     fi
 
     if [[ -f "$lua_config" ]]; then
-        if grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config" || grep -qF -- "$HYPR_AUTOLOCK_LUA_EXEC" "$lua_config"; then
-            hypr_strip_autolock_lua "$lua_config"
-            removed=true
+        if grep -qF 'bootstrap.lua' "$lua_config"; then
+            had_bootstrap=true
         fi
+        if grep -Eq "require[[:space:]]*\\([[:space:]]*['\"]default\\.hypr\\.omarchy['\"][[:space:]]*\\)" "$lua_config"; then
+            had_omarchy=true
+        fi
+        if grep -Eq "^[[:space:]]*require[[:space:]]*\\([[:space:]]*['\"]hypr\\.autostart['\"][[:space:]]*\\)[[:space:]]*$" "$lua_config"; then
+            target="$hypr_dir/autostart.lua"
+            api_style=omarchy
+        else
+            target="$lua_config"
+            api_style=raw
+        fi
+    elif [[ -f "$conf_config" ]]; then
+        target="$conf_config"
+        api_style=conf
+    else
+        echo "⚠ Warning: No Hyprland config was found in $hypr_dir; auto-lock was not configured." >&2
+        return 1
+    fi
+
+    if ! lock_command=$(hypr_resolve_lock_command); then
+        return 1
+    fi
+
+    [[ -f "$target" ]] && target_existed=true
+    if [[ "$api_style" == conf ]]; then
+        if ! hypr_write_autolock_conf "$target" "$owner" "$lock_command"; then
+            return 1
+        fi
+        echo "✓ Added screen-lock autostart to Hyprland conf ($target)"
+        return 0
+    fi
+
+    if ! hypr_write_autolock_lua "$target" "$owner" "$api_style" "$lock_command"; then
+        return 1
+    fi
+
+    if [[ "$had_bootstrap" == true ]] && ! grep -qF 'bootstrap.lua' "$lua_config"; then
+        hypr_restore_backup "$target" "$owner" "$target_existed" || true
+        echo "⚠ Error: Omarchy's bootstrap disappeared; restored $target from backup." >&2
+        return 1
+    fi
+    if [[ "$had_omarchy" == true ]] && ! grep -Eq "require[[:space:]]*\\([[:space:]]*['\"]default\\.hypr\\.omarchy['\"][[:space:]]*\\)" "$lua_config"; then
+        hypr_restore_backup "$target" "$owner" "$target_existed" || true
+        echo "⚠ Error: Omarchy's entrypoint disappeared; restored $target from backup." >&2
+        return 1
+    fi
+    if command -v luac >/dev/null 2>&1 && ! luac -p "$target"; then
+        hypr_restore_backup "$target" "$owner" "$target_existed" || true
+        echo "⚠ Error: Lua validation failed; restored $target from backup." >&2
+        return 1
+    fi
+
+    echo "✓ Added screen-lock autostart to Hyprland lua ($target)"
+}
+
+hypr_remove_autolock() {
+    local user_home="$1"
+    local owner="$2"
+    local hypr_dir="$user_home/.config/hypr"
+    local conf_config="$hypr_dir/hyprland.conf"
+    local lua_config="$hypr_dir/hyprland.lua"
+    local autostart_config="$hypr_dir/autostart.lua"
+    local removed=false
+
+    if [[ -f "$lua_config" ]] && grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config"; then
+        removed=true
+        if ! hypr_repair_autolock_stub "$user_home" "$owner"; then
+            return 1
+        fi
+    fi
+
+    if [[ -f "$autostart_config" ]] && grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$autostart_config"; then
+        if ! hypr_strip_autolock_lua "$autostart_config" "$owner"; then
+            return 1
+        fi
+        removed=true
+    fi
+
+    if [[ -f "$lua_config" ]] && grep -qF -- "$HYPR_AUTOLOCK_LUA_MARKER" "$lua_config"; then
+        if ! hypr_strip_autolock_lua "$lua_config" "$owner"; then
+            return 1
+        fi
+        removed=true
+    fi
+
+    if [[ -f "$conf_config" ]] && { grep -qF -- "$HYPR_AUTOLOCK_CONF_MARKER" "$conf_config" || grep -qF -- "$HYPR_AUTOLOCK_CONF_END_MARKER" "$conf_config" || grep -q "exec-once.*$HYPR_AUTOLOCK_LEGACY_COMMAND" "$conf_config"; }; then
+        if ! hypr_strip_autolock_conf "$conf_config" "$owner"; then
+            return 1
+        fi
+        removed=true
     fi
 
     if [[ "$removed" == true ]]; then
         echo "✓ Removed auto-lock from Hyprland config"
     fi
 }
+# <<< HYPR AUTOLOCK LIB <<<
 
 # ============================================
 # SECTION 1: NETWORK CONFIGURATION
@@ -867,19 +1104,22 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                             echo "No .conf files found in /etc/sddm.conf.d/"
                         fi
                         
-                        # Check if hyprlock is installed
-                        if ! command -v hyprlock >/dev/null 2>&1; then
-                            echo "⚠ Warning: hyprlock not found. Installing..."
-                            pacman -S --needed --noconfirm hyprlock hypridle
+                        # Add autolock to the effective Hyprland config
+                        AUTOLOCK_CONFIGURED=false
+                        if hypr_add_autolock "$USER_HOME" "$AUTOLOGIN_USER"; then
+                            AUTOLOCK_CONFIGURED=true
+                        else
+                            echo "⚠ Auto-lock could not be configured; continuing setup."
                         fi
                         
-                        # Add autolock to Hyprland config (legacy conf + modern lua)
-                        hypr_add_autolock "$USER_HOME"
+                        if [[ -d "$USER_HOME/.config/hypr" ]] && ! chown -R $AUTOLOGIN_USER:$AUTOLOGIN_USER "$USER_HOME/.config/hypr"; then
+                            echo "⚠ Could not normalize ownership of the Hyprland config directory; continuing setup."
+                        fi
                         
-                        chown -R $AUTOLOGIN_USER:$AUTOLOGIN_USER "$USER_HOME/.config/hypr"
-                        
-                        echo "✓ Auto-lock configured for user '$AUTOLOGIN_USER'"
-                        echo "  The screen will lock 3 seconds after login using hyprlock"
+                        if [[ "$AUTOLOCK_CONFIGURED" == true ]]; then
+                            echo "✓ Auto-lock configured for user '$AUTOLOGIN_USER'"
+                            echo "  The screen will lock 3 seconds after login"
+                        fi
                         
                         if [[ "$SDDM_CHANGED" == true ]]; then
                             echo ""
@@ -895,8 +1135,10 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                         AUTOLOGIN_USER=$(grep -h "^User=\|^#User=" /etc/sddm.conf.d/*.conf /etc/sddm.conf.d/*.disabled /etc/sddm.conf 2>/dev/null | head -n1 | sed 's/^#//' | cut -d= -f2)
                         if [[ -n "$AUTOLOGIN_USER" ]]; then
                             USER_HOME=$(eval echo ~$AUTOLOGIN_USER)
-                            # Remove autolock from Hyprland conf + lua if present
-                            hypr_remove_autolock "$USER_HOME"
+                            # Remove autolock from Hyprland configs if present
+                            if ! hypr_remove_autolock "$USER_HOME" "$AUTOLOGIN_USER"; then
+                                echo "⚠ Auto-lock cleanup was incomplete; continuing setup."
+                            fi
                         fi
                         
                         # Disable autologin by renaming config files in /etc/sddm.conf.d/
@@ -1000,8 +1242,10 @@ SDDM_CONF_EOF
                             done
                         fi
                         
-                        # Remove autolock from Hyprland conf + lua if present
-                        hypr_remove_autolock "$USER_HOME"
+                        # Remove autolock from Hyprland configs if present
+                        if ! hypr_remove_autolock "$USER_HOME" "$AUTOLOGIN_USER"; then
+                            echo "⚠ Auto-lock cleanup was incomplete; continuing setup."
+                        fi
                         
                         echo "⚠ No security protections active."
                         echo "Your system will boot directly to the desktop without authentication."
