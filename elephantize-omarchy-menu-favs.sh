@@ -4,6 +4,9 @@
 # Creates .desktop files for common Omarchy menu functions
 # Makes them accessible through the app launcher (Super + Space)
 #
+# Supports Omarchy 3.x (Walker/Elephant + hyprlock/wiremix/bluetui/impala)
+# and Omarchy Quattro (4.x: Omarchy menu + shell panels + omarchy-system-lock).
+#
 # Usage: ./elephantize-omarchy-menu-favs.sh [item1 item2 ...]
 # Available items: audio bluetooth install-package install-aur wifi suspend lock config
 # If no items specified, all items are installed by default.
@@ -32,6 +35,18 @@ cat << "EOF"
 ╚═══════════════════════════════════════════════════════════════╝
 EOF
 echo -e "${NC}"
+
+launch_terminal() {
+    # Quote a command so a .desktop Exec= line can run it in the user's terminal.
+    local cmd="$1"
+    if command -v omarchy-launch-tui >/dev/null 2>&1; then
+        printf 'omarchy-launch-tui %s' "$cmd"
+    elif command -v xdg-terminal-exec >/dev/null 2>&1; then
+        printf "xdg-terminal-exec --app-id=org.omarchy.terminal -e %s" "$cmd"
+    else
+        printf "alacritty -e bash -c %s" "'$cmd; exec bash'"
+    fi
+}
 
 # Determine which items to install
 if [ $# -gt 0 ]; then
@@ -77,14 +92,45 @@ fi
 MISSING_DEPS=()
 for item in "${VALID_ITEMS[@]}"; do
     case "$item" in
-        audio)           command -v wiremix &>/dev/null || MISSING_DEPS+=("wiremix (for audio)") ;;
-        bluetooth)       command -v bluetui &>/dev/null || MISSING_DEPS+=("bluetui (for bluetooth)") ;;
-        install-package) command -v fzf &>/dev/null    || MISSING_DEPS+=("fzf (for install-package)") ;;
-        install-aur)     command -v yay &>/dev/null    || MISSING_DEPS+=("yay (for install-aur)") ;;
-        wifi)            command -v impala &>/dev/null  || MISSING_DEPS+=("impala (for wifi)") ;;
-        suspend)         command -v systemctl &>/dev/null || MISSING_DEPS+=("systemctl (for suspend)") ;;
-        lock)            command -v hyprlock &>/dev/null || MISSING_DEPS+=("hyprlock (for lock)") ;;
-        config)          command -v fzf &>/dev/null    || MISSING_DEPS+=("fzf (for config)") ;;
+        audio)
+            command -v omarchy-shell &>/dev/null \
+                || command -v wiremix &>/dev/null \
+                || MISSING_DEPS+=("omarchy-shell or wiremix (for audio)")
+            ;;
+        bluetooth)
+            command -v omarchy-shell &>/dev/null \
+                || command -v bluetui &>/dev/null \
+                || MISSING_DEPS+=("omarchy-shell or bluetui (for bluetooth)")
+            ;;
+        install-package)
+            command -v omarchy-pkg-install &>/dev/null \
+                || command -v fzf &>/dev/null \
+                || MISSING_DEPS+=("omarchy-pkg-install or fzf (for install-package)")
+            ;;
+        install-aur)
+            command -v omarchy-pkg-aur-install &>/dev/null \
+                || command -v yay &>/dev/null \
+                || MISSING_DEPS+=("omarchy-pkg-aur-install or yay (for install-aur)")
+            ;;
+        wifi)
+            command -v omarchy-shell &>/dev/null \
+                || command -v impala &>/dev/null \
+                || command -v nmtui &>/dev/null \
+                || MISSING_DEPS+=("omarchy-shell, impala, or nmtui (for wifi)")
+            ;;
+        suspend)
+            command -v systemctl &>/dev/null || MISSING_DEPS+=("systemctl (for suspend)")
+            ;;
+        lock)
+            command -v omarchy-system-lock &>/dev/null \
+                || command -v hyprlock &>/dev/null \
+                || MISSING_DEPS+=("omarchy-system-lock or hyprlock (for lock)")
+            ;;
+        config)
+            command -v omarchy-menu &>/dev/null \
+                || command -v fzf &>/dev/null \
+                || MISSING_DEPS+=("omarchy-menu or fzf (for config)")
+            ;;
     esac
 done
 
@@ -103,14 +149,58 @@ echo -e "${BLUE}The following desktop entries will be created in:${NC} $APPS_DIR
 for item in "${VALID_ITEMS[@]}"; do
     label=""
     case "$item" in
-        audio)           label="Omarchy Audio (wiremix)" ;;
-        bluetooth)       label="Omarchy Bluetooth (BlueTUI)" ;;
-        install-package) label="Install Package (fzf)" ;;
-        install-aur)     label="Install AUR Package (fzf)" ;;
-        wifi)            label="Omarchy WiFi (Impala)" ;;
+        audio)
+            if command -v omarchy-shell &>/dev/null; then
+                label="Omarchy Audio (shell panel)"
+            else
+                label="Omarchy Audio (wiremix)"
+            fi
+            ;;
+        bluetooth)
+            if command -v omarchy-shell &>/dev/null; then
+                label="Omarchy Bluetooth (shell panel)"
+            else
+                label="Omarchy Bluetooth (BlueTUI)"
+            fi
+            ;;
+        install-package)
+            if command -v omarchy-pkg-install &>/dev/null; then
+                label="Install Package (omarchy pkg install)"
+            else
+                label="Install Package (fzf)"
+            fi
+            ;;
+        install-aur)
+            if command -v omarchy-pkg-aur-install &>/dev/null; then
+                label="Install AUR Package (omarchy pkg aur install)"
+            else
+                label="Install AUR Package (fzf)"
+            fi
+            ;;
+        wifi)
+            if command -v omarchy-shell &>/dev/null; then
+                label="Omarchy WiFi (shell panel)"
+            elif command -v impala &>/dev/null; then
+                label="Omarchy WiFi (Impala)"
+            else
+                label="Omarchy WiFi (nmtui)"
+            fi
+            ;;
         suspend)         label="Suspend System" ;;
-        lock)            label="Lock Screen (hyprlock)" ;;
-        config)          label="Omarchy Config (config selector)" ;;
+        lock)
+            if command -v omarchy-system-lock &>/dev/null; then
+                label="Lock Screen (omarchy-system-lock)"
+            else
+                label="Lock Screen (hyprlock)"
+            fi
+            ;;
+        config)
+            if command -v omarchy-menu &>/dev/null; then
+                label="Omarchy Config (Setup > Config)"
+            else
+                label="Omarchy Config (config selector)"
+            fi
+            ;;
     esac
     existing=""
     if [ -f "$APPS_DIR/omarchy-${item}.desktop" ]; then
@@ -136,11 +226,17 @@ mkdir -p "$APPS_DIR"
 ################################################################################
 
 install_audio() {
-    cat > "$APPS_DIR/omarchy-audio.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-shell &>/dev/null; then
+        exec_line="omarchy-shell shell summon omarchy.audio"
+    else
+        exec_line="sh -c '$(launch_terminal wiremix)'"
+    fi
+    cat > "$APPS_DIR/omarchy-audio.desktop" << EOF
 [Desktop Entry]
 Name=Omarchy Audio
-Comment=Configure audio settings with wiremix
-Exec=sh -c 'alacritty -e bash -c "wiremix; exec bash"'
+Comment=Configure audio settings
+Exec=$exec_line
 Icon=audio-card
 Terminal=false
 Type=Application
@@ -148,15 +244,21 @@ Categories=Settings;Audio;Omarchy;
 Keywords=audio;sound;volume;mixer;pulseaudio;pipewire;wiremix;
 StartupNotify=true
 EOF
-    echo -e "${GREEN}✓${NC} Omarchy Audio (using wiremix)"
+    echo -e "${GREEN}✓${NC} Omarchy Audio"
 }
 
 install_bluetooth() {
-    cat > "$APPS_DIR/omarchy-bluetooth.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-shell &>/dev/null; then
+        exec_line="omarchy-shell shell summon omarchy.bluetooth"
+    else
+        exec_line="sh -c '$(launch_terminal bluetui)'"
+    fi
+    cat > "$APPS_DIR/omarchy-bluetooth.desktop" << EOF
 [Desktop Entry]
 Name=Omarchy Bluetooth
-Comment=Manage Bluetooth connections with BlueTUI
-Exec=sh -c 'alacritty -e bash -c "bluetui; exec bash"'
+Comment=Manage Bluetooth connections
+Exec=$exec_line
 Icon=bluetooth
 Terminal=false
 Type=Application
@@ -168,11 +270,21 @@ EOF
 }
 
 install_install-package() {
-    cat > "$APPS_DIR/omarchy-install-package.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-pkg-install &>/dev/null; then
+        if command -v xdg-terminal-exec &>/dev/null; then
+            exec_line="xdg-terminal-exec --app-id=org.omarchy.terminal omarchy-pkg-install"
+        else
+            exec_line="sh -c '$(launch_terminal omarchy-pkg-install)'"
+        fi
+    else
+        exec_line="sh -c 'alacritty -e bash -c \"pacman -Slq | fzf --preview '\\''pacman -Si {}'\\'' --preview-window=right:60%:wrap --prompt='\\''Install Package > '\\'' --header='\\''Select package(s) to install (TAB to multi-select, ENTER to install)'\\'' -m | xargs -ro sudo pacman -S; echo; echo '\\''Press Enter to close...'\\''; read\"'"
+    fi
+    cat > "$APPS_DIR/omarchy-install-package.desktop" << EOF
 [Desktop Entry]
 Name=Install Package
 Comment=Install packages from Arch repositories (interactive)
-Exec=sh -c 'alacritty -e bash -c "pacman -Slq | fzf --preview '\''pacman -Si {}'\'' --preview-window=right:60%:wrap --prompt='\''Install Package > '\'' --header='\''Select package(s) to install (TAB to multi-select, ENTER to install)'\'' -m | xargs -ro sudo pacman -S; echo; echo '\''Press Enter to close...'\''; read"'
+Exec=$exec_line
 Icon=system-software-install
 Terminal=false
 Type=Application
@@ -180,15 +292,25 @@ Categories=System;PackageManager;Omarchy;
 Keywords=install;package;pacman;software;arch;
 StartupNotify=true
 EOF
-    echo -e "${GREEN}✓${NC} Install Package (using fzf)"
+    echo -e "${GREEN}✓${NC} Install Package"
 }
 
 install_install-aur() {
-    cat > "$APPS_DIR/omarchy-install-aur.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-pkg-aur-install &>/dev/null; then
+        if command -v xdg-terminal-exec &>/dev/null; then
+            exec_line="xdg-terminal-exec --app-id=org.omarchy.terminal omarchy-pkg-aur-install"
+        else
+            exec_line="sh -c '$(launch_terminal omarchy-pkg-aur-install)'"
+        fi
+    else
+        exec_line="sh -c 'alacritty -e bash -c \"yay -Slq | fzf --preview '\\''yay -Si {}'\\'' --preview-window=right:60%:wrap --prompt='\\''Install AUR Package > '\\'' --header='\\''Select package(s) to install (TAB to multi-select, ENTER to install)'\\'' -m | xargs -ro yay -S; echo; echo '\\''Press Enter to close...'\\''; read\"'"
+    fi
+    cat > "$APPS_DIR/omarchy-install-aur.desktop" << EOF
 [Desktop Entry]
 Name=Install AUR Package
 Comment=Install packages from Arch User Repository (interactive)
-Exec=sh -c 'alacritty -e bash -c "yay -Slq | fzf --preview '\''yay -Si {}'\'' --preview-window=right:60%:wrap --prompt='\''Install AUR Package > '\'' --header='\''Select package(s) to install (TAB to multi-select, ENTER to install)'\'' -m | xargs -ro yay -S; echo; echo '\''Press Enter to close...'\''; read"'
+Exec=$exec_line
 Icon=system-software-install
 Terminal=false
 Type=Application
@@ -196,20 +318,28 @@ Categories=System;PackageManager;Omarchy;
 Keywords=install;aur;package;yay;software;arch;
 StartupNotify=true
 EOF
-    echo -e "${GREEN}✓${NC} Install AUR Package (using fzf)"
+    echo -e "${GREEN}✓${NC} Install AUR Package"
 }
 
 install_wifi() {
-    cat > "$APPS_DIR/omarchy-wifi.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-shell &>/dev/null; then
+        exec_line="omarchy-shell shell summon omarchy.network"
+    elif command -v impala &>/dev/null; then
+        exec_line="sh -c '$(launch_terminal impala)'"
+    else
+        exec_line="sh -c '$(launch_terminal nmtui)'"
+    fi
+    cat > "$APPS_DIR/omarchy-wifi.desktop" << EOF
 [Desktop Entry]
 Name=Omarchy WiFi
-Comment=Manage WiFi connections with Impala
-Exec=sh -c 'alacritty -e bash -c "impala; exec bash"'
+Comment=Manage WiFi connections
+Exec=$exec_line
 Icon=network-wireless
 Terminal=false
 Type=Application
 Categories=Settings;Network;Omarchy;
-Keywords=wifi;wireless;network;connection;impala;
+Keywords=wifi;wireless;network;connection;impala;nmtui;
 StartupNotify=true
 EOF
     echo -e "${GREEN}✓${NC} Omarchy WiFi"
@@ -232,27 +362,43 @@ EOF
 }
 
 install_lock() {
-    cat > "$APPS_DIR/omarchy-lock.desktop" << 'EOF'
+    local exec_line comment keywords
+    if command -v omarchy-system-lock &>/dev/null; then
+        exec_line="omarchy-system-lock"
+        comment="Lock the screen with Omarchy"
+        keywords="lock;screen;security;omarchy;"
+    else
+        exec_line="hyprlock"
+        comment="Lock the screen with hyprlock"
+        keywords="lock;screen;security;hyprlock;"
+    fi
+    cat > "$APPS_DIR/omarchy-lock.desktop" << EOF
 [Desktop Entry]
 Name=Lock Screen
-Comment=Lock the screen with hyprlock
-Exec=hyprlock
+Comment=$comment
+Exec=$exec_line
 Icon=system-lock-screen
 Terminal=false
 Type=Application
 Categories=System;Omarchy;
-Keywords=lock;screen;security;hyprlock;
+Keywords=$keywords
 StartupNotify=false
 EOF
     echo -e "${GREEN}✓${NC} Lock Screen"
 }
 
 install_config() {
-    cat > "$APPS_DIR/omarchy-config.desktop" << 'EOF'
+    local exec_line
+    if command -v omarchy-menu &>/dev/null; then
+        exec_line="omarchy menu summon setup.config"
+    else
+        exec_line="sh -c 'alacritty -e bash -c \"echo '\\''Select config to edit:'\\''; echo; configs=(hyprland waybar mako btop ghostty alacritty kitty neovim walker); selected=\$(printf '\\''%s\\\\n'\\'' \\\"\${configs[@]}\\\" | fzf --prompt='\\''Config > '\\'' --header='\\''Choose a configuration file to edit'\\''); if [ -n \\\"\$selected\\\" ]; then case \$selected in hyprland) nvim ~/.config/hypr/hyprland.conf ;; waybar) nvim ~/.config/waybar/config ;; mako) nvim ~/.config/mako/config ;; btop) nvim ~/.config/btop/btop.conf ;; ghostty) nvim ~/.config/ghostty/config ;; alacritty) nvim ~/.config/alacritty/alacritty.toml ;; kitty) nvim ~/.config/kitty/kitty.conf ;; neovim) nvim ~/.config/nvim/init.lua ;; walker) nvim ~/.config/walker/config.toml ;; esac; fi; exec bash\"'"
+    fi
+    cat > "$APPS_DIR/omarchy-config.desktop" << EOF
 [Desktop Entry]
 Name=Omarchy Config
 Comment=Open Omarchy configuration menu (Setup > Configs)
-Exec=sh -c 'alacritty -e bash -c "echo '\''Select config to edit:'\''; echo; configs=(hyprland waybar mako btop ghostty alacritty kitty neovim walker); selected=$(printf '\''%s\\n'\'' \"${configs[@]}\" | fzf --prompt='\''Config > '\'' --header='\''Choose a configuration file to edit'\''); if [ -n \"$selected\" ]; then case $selected in hyprland) nvim ~/.config/hypr/hyprland.conf ;; waybar) nvim ~/.config/waybar/config ;; mako) nvim ~/.config/mako/config ;; btop) nvim ~/.config/btop/btop.conf ;; ghostty) nvim ~/.config/ghostty/config ;; alacritty) nvim ~/.config/alacritty/alacritty.toml ;; kitty) nvim ~/.config/kitty/kitty.conf ;; neovim) nvim ~/.config/nvim/init.lua ;; walker) nvim ~/.config/walker/config.toml ;; esac; fi; exec bash"'
+Exec=$exec_line
 Icon=preferences-system
 Terminal=false
 Type=Application
@@ -289,8 +435,12 @@ else
     echo -e "${YELLOW}⚠${NC} update-desktop-database not found. You may need to log out and back in."
 fi
 
-# Restart elephant if it's running (to pick up new applications)
-if pgrep -x "elephant" > /dev/null; then
+# Refresh the launcher so new .desktop files appear without a session restart.
+if command -v omarchy-menu >/dev/null 2>&1; then
+    echo -e "\n${BLUE}Refreshing Omarchy menu...${NC}"
+    omarchy menu refresh >/dev/null 2>&1 || true
+    echo -e "${GREEN}✓${NC} Omarchy menu refreshed"
+elif pgrep -x "elephant" > /dev/null; then
     echo -e "\n${BLUE}Restarting Elephant service...${NC}"
     pkill elephant
     sleep 1
@@ -306,7 +456,14 @@ echo -e "${GREEN}╚════════════════════
 echo -e "\nInstalled items are now available in your app launcher (${BLUE}Super + Space${NC})."
 
 echo -e "\n${YELLOW}Tips:${NC}"
-echo -e "  • If they don't show up immediately, run: ${BLUE}omarchy-restart-walker${NC}"
+if command -v omarchy-restart-shell >/dev/null 2>&1; then
+    echo -e "  • If they don't show up immediately, run: ${BLUE}omarchy restart shell${NC}"
+    echo -e "    or ${BLUE}omarchy menu refresh${NC}"
+elif command -v omarchy-restart-walker >/dev/null 2>&1; then
+    echo -e "  • If they don't show up immediately, run: ${BLUE}omarchy-restart-walker${NC}"
+else
+    echo -e "  • If they don't show up immediately, log out and back in"
+fi
 echo -e "  • Desktop files are located in: ${BLUE}$APPS_DIR${NC}"
 
 echo -e "\n${YELLOW}To re-run and update:${NC}"
@@ -315,4 +472,8 @@ echo -e "  Just run this script again - it will ask before overwriting"
 echo -e "\n${YELLOW}To uninstall:${NC}"
 echo -e "  rm $APPS_DIR/omarchy-*.desktop"
 echo -e "  update-desktop-database $APPS_DIR"
-echo -e "  omarchy-restart-walker"
+if command -v omarchy-restart-shell >/dev/null 2>&1; then
+    echo -e "  omarchy restart shell"
+elif command -v omarchy-restart-walker >/dev/null 2>&1; then
+    echo -e "  omarchy-restart-walker"
+fi

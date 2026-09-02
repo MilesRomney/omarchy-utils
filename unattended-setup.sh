@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Omarchy Unified Setup Script
-# Comprehensive configuration for Omarchy Linux servers and remote access
+# Comprehensive configuration for Omarchy Linux servers and remote access.
+# Supports Omarchy 3.x and Omarchy Quattro (4.x).
 
 set -e  # Exit on error
 
@@ -20,12 +21,13 @@ echo ""
 echo "  1. Configure networking for a static IP, and set up SSH access"
 echo "  2. Install additional packages through the pacman package manager"
 echo "  3. Manage keybindings"
-echo "  4. Configure Neovim arrow-key line wrapping"
-echo "  5. Configure disk auto-decryption on boot (with options for mitigating security risk)"
-echo "  6. Configure headless boot (boot to text console; GUI launches on demand)"
-echo "  7. Disable system suspend/hibernate (recommended for unattended servers)"
-echo "  8. Enable persistent system journal logging"
-echo "  9. Install common AI workstation packages (Python, Docker, monitoring tools)"
+echo "  4. Reverse mouse scroll wheel direction (natural scrolling)"
+echo "  5. Configure Neovim arrow-key line wrapping"
+echo "  6. Configure disk auto-decryption on boot (with options for mitigating security risk)"
+echo "  7. Configure headless boot (boot to text console; GUI launches on demand)"
+echo "  8. Disable system suspend/hibernate (recommended for unattended servers)"
+echo "  9. Enable persistent system journal logging"
+echo "  10. Install common AI workstation packages (Python, Docker, monitoring tools)"
 echo ""
 echo "Brought to you by Miles David Romney at V42 and The Chief Innovator:"
 echo "https://www.linkedin.com/in/miles-david-romney-8b11a4/"
@@ -39,8 +41,24 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# Detect Omarchy generation. Quattro (4.x) ships ID=omarchy and VERSION_ID;
+# older releases identified as Arch and had no VERSION_ID in os-release.
+OMARCHY_VERSION=""
+OMARCHY_IS_QUATTRO=false
+if [[ -f /etc/os-release ]]; then
+    OMARCHY_VERSION=$(awk -F= '/^VERSION_ID=/{gsub(/"/,""); print $2; exit}' /etc/os-release)
+fi
+if [[ -z "$OMARCHY_VERSION" ]] && command -v omarchy >/dev/null 2>&1; then
+    OMARCHY_VERSION=$(omarchy version 2>/dev/null | head -n1)
+fi
+if grep -q '^ID=omarchy$' /etc/os-release 2>/dev/null \
+    || command -v omarchy-shell >/dev/null 2>&1 \
+    || [[ "$OMARCHY_VERSION" == 4.* ]]; then
+    OMARCHY_IS_QUATTRO=true
+fi
+
 # Check if running on Omarchy Linux
-if [[ ! -f /etc/os-release ]] || ! grep -qi "ID=arch" /etc/os-release; then
+if [[ ! -f /etc/os-release ]] || ! grep -qiE '^ID=omarchy$|^ID=arch$|^ID_LIKE=.*\<arch\>' /etc/os-release; then
    echo "ERROR: This script is designed for Omarchy Linux only."
    echo "It appears you are not running Omarchy Linux."
    echo ""
@@ -51,6 +69,15 @@ if [[ ! -f /etc/os-release ]] || ! grep -qi "ID=arch" /etc/os-release; then
    echo ""
    echo "Please run this script on an Omarchy Linux system."
    exit 1
+fi
+
+if [[ -n "$OMARCHY_VERSION" ]]; then
+    if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+        echo "Detected Omarchy $OMARCHY_VERSION (Quattro)"
+    else
+        echo "Detected Omarchy $OMARCHY_VERSION"
+    fi
+    echo ""
 fi
 
 # Detect or ask for the primary user
@@ -270,6 +297,11 @@ hypr_resolve_lock_command() {
     elif command -v hyprlock >/dev/null 2>&1; then
         printf '%s\n' "hyprlock"
     else
+        # Quattro locks through the Omarchy shell (omarchy-system-lock), not hyprlock.
+        if command -v omarchy-shell >/dev/null 2>&1 || grep -q '^ID=omarchy$' /etc/os-release 2>/dev/null; then
+            echo "⚠ Error: Omarchy's lock command (omarchy-system-lock) was not found" >&2
+            return 1
+        fi
         echo "⚠ Neither Omarchy's lock command nor hyprlock was found; installing the fallback..." >&2
         if ! pacman -S --needed --noconfirm hyprlock hypridle >&2; then
             echo "⚠ Error: Could not install the fallback screen locker" >&2
@@ -472,6 +504,186 @@ hypr_remove_autolock() {
 }
 # <<< HYPR AUTOLOCK LIB <<<
 
+HYPR_NATURAL_SCROLL_LUA_MARKER="-- Reverse mouse scroll wheel direction"
+HYPR_NATURAL_SCROLL_LUA_END_MARKER="-- End reverse mouse scroll wheel direction"
+HYPR_NATURAL_SCROLL_CONF_MARKER="# Reverse mouse scroll wheel direction"
+HYPR_NATURAL_SCROLL_CONF_END_MARKER="# End reverse mouse scroll wheel direction"
+
+hypr_filter_marked_block() {
+    local config="$1"
+    local start="$2"
+    local end="$3"
+
+    awk -v start="$start" -v end="$end" '
+        $0 == start { in_block = 1; next }
+        in_block && $0 == end { in_block = 0; next }
+        in_block { next }
+        { print }
+    ' "$config"
+}
+
+hypr_enable_natural_scroll() {
+    local user_home="$1"
+    local owner="$2"
+    local hypr_dir="$user_home/.config/hypr"
+    local lua_config="$hypr_dir/input.lua"
+    local conf_config="$hypr_dir/input.conf"
+    local hyprland_lua="$hypr_dir/hyprland.lua"
+    local hyprland_conf="$hypr_dir/hyprland.conf"
+    local target
+    local style
+    local tmp_file
+    local start_marker
+    local end_marker
+    local target_existed=false
+
+    if [[ ! -d "$hypr_dir" ]]; then
+        echo "⚠ Warning: No Hyprland config directory at $hypr_dir; scroll direction was not changed." >&2
+        return 1
+    fi
+
+    if [[ -f "$lua_config" || -f "$hyprland_lua" ]]; then
+        target="$lua_config"
+        style=lua
+        start_marker="$HYPR_NATURAL_SCROLL_LUA_MARKER"
+        end_marker="$HYPR_NATURAL_SCROLL_LUA_END_MARKER"
+    elif [[ -f "$conf_config" ]]; then
+        target="$conf_config"
+        style=conf
+        start_marker="$HYPR_NATURAL_SCROLL_CONF_MARKER"
+        end_marker="$HYPR_NATURAL_SCROLL_CONF_END_MARKER"
+    elif [[ -f "$hyprland_conf" ]]; then
+        target="$hyprland_conf"
+        style=conf
+        start_marker="$HYPR_NATURAL_SCROLL_CONF_MARKER"
+        end_marker="$HYPR_NATURAL_SCROLL_CONF_END_MARKER"
+    else
+        echo "⚠ Warning: No Hyprland input config was found in $hypr_dir; scroll direction was not changed." >&2
+        return 1
+    fi
+
+    [[ -f "$target" ]] && target_existed=true
+    if ! hypr_make_backup "$target" "$owner"; then
+        return 1
+    fi
+    if ! tmp_file=$(mktemp "$(dirname "$target")/.hypr-natural-scroll.XXXXXX"); then
+        echo "⚠ Error: Could not create a temporary file beside $target" >&2
+        return 1
+    fi
+
+    if [[ -f "$target" ]]; then
+        if ! hypr_filter_marked_block "$target" "$start_marker" "$end_marker" > "$tmp_file"; then
+            rm -f "$tmp_file"
+            return 1
+        fi
+    fi
+
+    {
+        printf '%s\n' "$start_marker"
+        if [[ "$style" == lua ]]; then
+            printf 'hl.config({ ["input.natural_scroll"] = true })\n'
+        else
+            printf 'input {\n  natural_scroll = true\n}\n'
+        fi
+        printf '%s\n' "$end_marker"
+    } >> "$tmp_file"
+
+    if ! hypr_set_file_metadata "$tmp_file" "$owner" || ! mv "$tmp_file" "$target"; then
+        rm -f "$tmp_file"
+        echo "⚠ Error: Could not safely update $target" >&2
+        return 1
+    fi
+
+    if [[ "$style" == lua ]] && command -v luac >/dev/null 2>&1 && ! luac -p "$target"; then
+        hypr_restore_backup "$target" "$owner" "$target_existed" || true
+        echo "⚠ Error: Lua validation failed; restored $target from backup." >&2
+        return 1
+    fi
+
+    echo "✓ Reversed mouse scroll wheel direction in $target"
+}
+
+configure_static_ip() {
+    local interface="$1"
+    local static_ip="$2"
+    local gateway="$3"
+    local conn
+    local dev_type
+
+    if systemctl is-enabled NetworkManager.service &>/dev/null \
+        || systemctl is-active NetworkManager.service &>/dev/null; then
+        echo "Using NetworkManager (Omarchy Quattro default)..."
+
+        if ! command -v nmcli >/dev/null 2>&1; then
+            echo "⚠ Error: NetworkManager is enabled but nmcli was not found"
+            return 1
+        fi
+
+        systemctl start NetworkManager.service >/dev/null 2>&1 || true
+
+        conn=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null \
+            | awk -F: -v iface="$interface" '$2 == iface {print $1; exit}')
+        if [[ -z "$conn" ]]; then
+            conn=$(nmcli -t -f NAME,DEVICE connection show 2>/dev/null \
+                | awk -F: -v iface="$interface" '$2 == iface {print $1; exit}')
+        fi
+        if [[ -z "$conn" ]]; then
+            conn=$(nmcli -t -f NAME,connection.interface-name connection show 2>/dev/null \
+                | awk -F: -v iface="$interface" '$NF == iface {print $1; exit}')
+        fi
+
+        dev_type=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+            | awk -F: -v iface="$interface" '$1 == iface {print $2; exit}')
+
+        if [[ -n "$conn" ]]; then
+            echo "Updating existing connection '$conn' on $interface..."
+            nmcli connection modify "$conn" \
+                ipv4.method manual \
+                ipv4.addresses "$static_ip/24" \
+                ipv4.gateway "$gateway" \
+                ipv4.dns "8.8.8.8 8.8.4.4" \
+                ipv4.ignore-auto-dns yes \
+                connection.autoconnect yes
+            nmcli connection up "$conn"
+        else
+            if [[ "$dev_type" == "wifi" ]]; then
+                echo "⚠ Error: No saved NetworkManager connection for Wi-Fi interface $interface."
+                echo "  Connect to the network once first, then re-run this script."
+                return 1
+            fi
+            conn="omarchy-static-$interface"
+            echo "Creating NetworkManager connection '$conn'..."
+            nmcli connection add type ethernet ifname "$interface" con-name "$conn" \
+                ipv4.method manual \
+                ipv4.addresses "$static_ip/24" \
+                ipv4.gateway "$gateway" \
+                ipv4.dns "8.8.8.8 8.8.4.4" \
+                ipv4.ignore-auto-dns yes \
+                connection.autoconnect yes
+            nmcli connection up "$conn"
+        fi
+
+        echo "✓ Static IP configured via NetworkManager"
+        return 0
+    fi
+
+    echo "Using systemd-networkd (legacy Omarchy)..."
+    mkdir -p /etc/systemd/network
+    cat > /etc/systemd/network/10-static.network <<EOF
+[Match]
+Name=$interface
+
+[Network]
+Address=$static_ip/24
+Gateway=$gateway
+DNS=8.8.8.8
+DNS=8.8.4.4
+EOF
+    systemctl enable systemd-networkd
+    systemctl restart systemd-networkd
+    echo "✓ Static IP configured via systemd-networkd"
+}
+
 # ============================================
 # SECTION 1: NETWORK CONFIGURATION
 # ============================================
@@ -542,20 +754,9 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         pacman -S --needed --noconfirm openssh
 
         echo "[Network 2/6] Configuring static IP address..."
-        mkdir -p /etc/systemd/network
-        cat > /etc/systemd/network/10-static.network <<EOF
-[Match]
-Name=$INTERFACE
-
-[Network]
-Address=$STATIC_IP/24
-Gateway=$GATEWAY
-DNS=8.8.8.8
-DNS=8.8.4.4
-EOF
-
-        systemctl enable systemd-networkd
-        systemctl restart systemd-networkd
+        if ! configure_static_ip "$INTERFACE" "$STATIC_IP" "$GATEWAY"; then
+            echo "⚠ Static IP configuration failed; continuing with remaining network steps."
+        fi
 
         echo "[Network 3/6] Configuring SSH to use port $SSH_PORT..."
         if grep -q "^Port " /etc/ssh/sshd_config; then
@@ -583,7 +784,9 @@ EOF
         echo "[Network 6/6] Configuring SSH public key for $PRIMARY_USER user..."
         OMARCHY_HOME=$(eval echo ~$PRIMARY_USER)
         mkdir -p "$OMARCHY_HOME/.ssh"
-        
+        chmod 700 "$OMARCHY_HOME/.ssh"
+        chown "$PRIMARY_USER:$PRIMARY_USER" "$OMARCHY_HOME/.ssh"
+
         echo ""
         echo "Would you like to add a public key to your SSH authorized_keys?"
         echo "If so, paste it here. (default: none)"
@@ -599,7 +802,7 @@ EOF
             echo "$SSH_PUBLIC_KEY" >> "$OMARCHY_HOME/.ssh/authorized_keys"
             
             chmod 600 "$OMARCHY_HOME/.ssh/authorized_keys"
-            chown -R $PRIMARY_USER:$PRIMARY_USER "$OMARCHY_HOME/.ssh"
+            chown "$PRIMARY_USER:$PRIMARY_USER" "$OMARCHY_HOME/.ssh/authorized_keys"
             echo "✓ SSH public key added"
         else
             echo "No SSH public key added"
@@ -717,7 +920,35 @@ else
 fi
 
 # ============================================
-# SECTION 4: NEOVIM CONFIGURATION
+# SECTION 4: MOUSE SCROLL DIRECTION
+# ============================================
+
+echo ""
+read -p "Would you like to reverse the mouse scroll wheel direction (natural scrolling)? [y/N]: " REVERSE_SCROLL
+REVERSE_SCROLL=${REVERSE_SCROLL:-N}
+
+if [[ "$REVERSE_SCROLL" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "=== Mouse Scroll Direction ==="
+    echo ""
+    echo "This enables Hyprland natural scrolling for the mouse wheel, so the"
+    echo "content follows the wheel instead of the scrollbar (macOS-style)."
+    echo "Touchpad scrolling is left at Omarchy's default."
+    echo ""
+
+    USER_HOME=$(eval echo ~$PRIMARY_USER)
+    if hypr_enable_natural_scroll "$USER_HOME" "$PRIMARY_USER"; then
+        echo "  Content will now move in the same direction as the scroll wheel."
+    else
+        echo "⚠ Mouse scroll direction was not changed."
+        REVERSE_SCROLL="N"
+    fi
+else
+    echo "Mouse scroll direction left at the default."
+fi
+
+# ============================================
+# SECTION 5: NEOVIM CONFIGURATION
 # ============================================
 
 echo ""
@@ -780,7 +1011,7 @@ else
 fi
 
 # ============================================
-# SECTION 5: DISK AUTO-DECRYPTION
+# SECTION 6: DISK AUTO-DECRYPTION
 # ============================================
 
 echo ""
@@ -1004,6 +1235,10 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 echo ""
                 echo "⚠ IMPORTANT: Disk decryption is now automatic on boot. This presents a security"
                 echo "risk, given that Omarchy's stock configuration includes SDDM autologin."
+                if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+                    echo "Quattro locks the session through the Omarchy shell (omarchy-system-lock),"
+                    echo "not hyprlock."
+                fi
                 echo ""
                 echo "Current SDDM configuration:"
                 if ls /etc/sddm.conf.d/*.conf 2>/dev/null | grep -q .; then
@@ -1023,8 +1258,12 @@ if [[ "$CONFIGURE_LUKS" =~ ^[Yy]$ ]]; then
                 echo "Would you like to:"
                 echo "  1. Keep SDDM autologin, but automatically lock the screen (recommended)"
                 echo "  2. Disable SDDM autologin entirely"
-                echo "     Note: Omarchy has not applied its theme to the login screen, so you will"
-                echo "     see the default Arch/SDDM UI"
+                if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+                    echo "     You will see the Omarchy-themed SDDM login screen"
+                else
+                    echo "     Note: Omarchy has not applied its theme to the login screen, so you will"
+                    echo "     see the default Arch/SDDM UI"
+                fi
                 echo "  3. Do nothing, and accept the security risk of automatic disk decryption + autologin"
                 echo ""
                 read -p "Enter your choice [1-3] (default: 1): " SECURITY_CHOICE
@@ -1182,7 +1421,11 @@ SDDM_CONF_EOF
                             echo ""
                             echo "⚠ IMPORTANT: You must reboot for autologin to be fully disabled."
                             echo "After reboot, you will see the SDDM login screen."
-                            echo "Note: Omarchy has not applied its theme to the login screen."
+                            if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+                                echo "Quattro themes the SDDM login screen with the Omarchy theme."
+                            else
+                                echo "Note: Omarchy has not applied its theme to the login screen."
+                            fi
                         fi
                         ;;
                         
@@ -1278,7 +1521,7 @@ else
 fi
 
 # ============================================
-# SECTION 6: HEADLESS BOOT MODE
+# SECTION 7: HEADLESS BOOT MODE
 # ============================================
 
 echo ""
@@ -1295,7 +1538,12 @@ if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
     echo "After applying:"
     echo "  - System boots to text console (tty1)"
     echo "  - All GPU drivers (NVIDIA/AMD), CUDA, and ROCm remain fully available"
-    echo "  - To launch Hyprland on demand: type 'gui' at the console"
+    if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+        echo "  - To launch the Omarchy session on demand: type 'gui' at the console"
+        echo "    (uwsm starts Hyprland; the Omarchy shell follows from autostart)"
+    else
+        echo "  - To launch Hyprland on demand: type 'gui' at the console"
+    fi
     echo "  - To start SDDM on demand: 'sudo systemctl start sddm'"
     echo ""
     echo "This is recommended for AI workstation / server use, where you primarily"
@@ -1331,9 +1579,10 @@ if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
         GUI_LAUNCHER="/usr/local/bin/gui"
         cat > "$GUI_LAUNCHER" <<'GUI_EOF'
 #!/bin/bash
-# Launch Hyprland on demand from a TTY.
-# Hyprland's exec-once directives handle starting ancillary services
-# (pipewire, waybar, mako, etc.) automatically.
+# Launch the Omarchy Hyprland session on demand from a TTY.
+# Quattro: uwsm starts Hyprland; ~/.config/hypr/autostart.lua launches the
+# Omarchy shell (bar, menus, lock, notifications).
+# Older Omarchy: exec Hyprland directly; exec-once starts ancillary services.
 
 if [[ -n "$WAYLAND_DISPLAY" ]] || [[ -n "$DISPLAY" ]]; then
     echo "A GUI session appears to already be running."
@@ -1347,12 +1596,15 @@ if [[ -z "$XDG_VTNR" ]] || [[ "$XDG_VTNR" -eq 0 ]]; then
     exit 1
 fi
 
-# Set up minimal Wayland environment
 export XDG_SESSION_TYPE=wayland
+
+# Match Omarchy's packaged wayland session (omarchy.desktop).
+if command -v uwsm >/dev/null 2>&1; then
+    exec uwsm start -g -1 -e -D Hyprland hyprland.desktop
+fi
+
 export XDG_SESSION_DESKTOP=Hyprland
 export XDG_CURRENT_DESKTOP=Hyprland
-
-# Hand off to Hyprland
 exec Hyprland
 GUI_EOF
         chmod +x "$GUI_LAUNCHER"
@@ -1377,7 +1629,7 @@ else
 fi
 
 # ============================================
-# SECTION 7: DISABLE SUSPEND/HIBERNATE
+# SECTION 8: DISABLE SUSPEND/HIBERNATE
 # ============================================
 
 echo ""
@@ -1423,7 +1675,7 @@ else
 fi
 
 # ============================================
-# SECTION 8: PERSISTENT JOURNAL LOGGING
+# SECTION 9: PERSISTENT JOURNAL LOGGING
 # ============================================
 
 echo ""
@@ -1469,7 +1721,7 @@ else
 fi
 
 # ============================================
-# SECTION 9: AI WORKSTATION PACKAGES
+# SECTION 10: AI WORKSTATION PACKAGES
 # ============================================
 
 echo ""
@@ -1485,7 +1737,12 @@ if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
     echo ""
     echo "Already provided by Omarchy (will NOT be reinstalled):"
     echo "  Python (via base deps), git, btop, tmux, jq, docker, docker-compose"
-    echo "  (Omarchy also pre-configures docker group membership for your user.)"
+    if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+        echo "  Quattro does NOT add your user to the docker group by default"
+        echo "  (that group is root-equivalent). This script can still add it if missing."
+    else
+        echo "  (Older Omarchy pre-configured docker group membership for your user.)"
+    fi
     echo ""
     echo "Additional packages to install:"
     echo ""
@@ -1525,9 +1782,10 @@ if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
             echo "⚠ Some packages may have failed; check output above"
         fi
 
-        # Verify docker is functional (Omarchy should have done this, but verify)
+        # Verify docker is functional. Quattro leaves the user out of the docker
+        # group on purpose (sudoless docker is root-equivalent); add it only if missing.
         echo ""
-        echo "Verifying Docker configuration (Omarchy normally handles this)..."
+        echo "Verifying Docker configuration..."
         if systemctl is-enabled docker.service &>/dev/null; then
             echo "✓ Docker service is enabled"
         else
@@ -1539,9 +1797,10 @@ if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
         if groups "$PRIMARY_USER" | grep -q docker; then
             echo "✓ $PRIMARY_USER is in docker group"
         else
-            echo "$PRIMARY_USER not in docker group; adding..."
+            echo "$PRIMARY_USER is not in the docker group."
+            echo "⚠ Adding a user to the docker group is equivalent to passwordless root."
             usermod -aG docker "$PRIMARY_USER"
-            echo "✓ Added $PRIMARY_USER to docker group (log out/in to take effect)"
+            echo "✓ Added $PRIMARY_USER to docker group (reboot or re-login to take effect)"
         fi
 
         echo ""
@@ -1587,6 +1846,9 @@ if [[ "$PACKAGES" != "none" && -n "$PACKAGES" ]]; then
 fi
 if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     echo "  ✓ Keybindings swapped (SUPER ↔ ALT)"
+fi
+if [[ "$REVERSE_SCROLL" =~ ^[Yy]$ ]]; then
+    echo "  ✓ Mouse scroll wheel reversed (natural scrolling)"
 fi
 if [[ "$CONFIGURE_NVIM" =~ ^[Yy]$ ]]; then
     echo "  ✓ Neovim arrow-key behavior configured"
