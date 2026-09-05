@@ -4,13 +4,36 @@
 # Creates .desktop files for common Omarchy menu functions
 # Makes them accessible through the app launcher (Super + Space)
 #
-# Supports Omarchy 3.x (Walker/Elephant + hyprlock/wiremix/bluetui/impala)
-# and Omarchy Quattro (4.x: Omarchy menu + shell panels + omarchy-system-lock).
+# Pre-Quattro only (Walker/Elephant). Omarchy 4+ has a built-in Omarchy menu;
+# this installer exits instead of creating duplicate .desktop stubs.
 #
 # Usage: ./elephantize-omarchy-menu-favs.sh [item1 item2 ...]
 # Available items: audio bluetooth install-package install-aur wifi suspend lock config
 # If no items specified, all items are installed by default.
 ################################################################################
+
+# Elephant/Walker is not part of Omarchy 4+ (Quattro). The built-in Omarchy
+# menu already covers these items; installing the old .desktop stubs creates
+# duplicate and outdated entries.
+omarchy_major_version() {
+    local v
+    v=$(grep -E '^VERSION_ID=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')
+    if [[ -z "$v" ]] && command -v omarchy >/dev/null 2>&1; then
+        v=$(omarchy version 2>/dev/null | head -n1)
+    fi
+    v=${v%%-*}
+    echo "${v%%.*}"
+}
+
+OMARCHY_MAJOR=$(omarchy_major_version)
+if [[ "$OMARCHY_MAJOR" =~ ^[0-9]+$ ]] && (( OMARCHY_MAJOR >= 4 )); then
+    echo "elephantize-omarchy-menu-favs is not needed on Omarchy ${OMARCHY_MAJOR}+ (Quattro)."
+    echo "The Elephant/Walker launcher is no longer part of the Omarchy package;"
+    echo "these actions live in the built-in Omarchy menu. Installing these"
+    echo ".desktop files would create duplicate/outdated menu entries."
+    echo "Nothing was changed."
+    exit 1
+fi
 
 # Default list of items to install (override by passing items as arguments)
 DEFAULT_ITEMS=(audio bluetooth install-package install-aur wifi suspend lock config)

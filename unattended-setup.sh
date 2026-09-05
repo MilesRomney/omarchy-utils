@@ -724,8 +724,13 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         done
     fi
     
-    read -p "SSH port [22]: " SSH_PORT
-    SSH_PORT=${SSH_PORT:-22}
+    DEFAULT_SSH_PORT=22
+    if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
+        CURRENT_SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+        DEFAULT_SSH_PORT=${CURRENT_SSH_PORT:-22}
+    fi
+    read -p "SSH port [${DEFAULT_SSH_PORT}]: " SSH_PORT
+    SSH_PORT=${SSH_PORT:-$DEFAULT_SSH_PORT}
 
     read -p "Network gateway [192.168.1.1]: " GATEWAY
     GATEWAY=${GATEWAY:-192.168.1.1}
@@ -751,14 +756,14 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     else
         echo ""
         echo "[Network 1/6] Installing essential packages..."
-        pacman -S --needed --noconfirm openssh
+        pacman -S --needed --noconfirm openssh ufw
 
         echo "[Network 2/6] Configuring static IP address..."
         if ! configure_static_ip "$INTERFACE" "$STATIC_IP" "$GATEWAY"; then
             echo "⚠ Static IP configuration failed; continuing with remaining network steps."
         fi
 
-        echo "[Network 3/6] Configuring SSH to use port $SSH_PORT..."
+        echo "[Network 3/6] Configuring SSH port $SSH_PORT and UFW..."
         if grep -q "^Port " /etc/ssh/sshd_config; then
             sed -i "s/^Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
         elif grep -q "^#Port " /etc/ssh/sshd_config; then
@@ -766,9 +771,12 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         else
             echo "Port $SSH_PORT" >> /etc/ssh/sshd_config
         fi
-        if command -v ufw >/dev/null 2>&1; then
-            ufw allow "$SSH_PORT"/tcp
-        fi
+        # UFW default-deny incoming. Allowing the port without enabling UFW
+        # leaves SSH blocked once UFW is later turned on (Quattro's default).
+        ufw allow "$SSH_PORT"/tcp comment 'sshd'
+        systemctl enable ufw
+        ufw --force enable
+        ufw status numbered || true
 
         echo "[Network 4/6] Enabling and starting SSH service..."
         systemctl enable sshd
@@ -819,6 +827,7 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         echo "=== Network Configuration Complete ==="
         echo "✓ Static IP configured: $STATIC_IP on $INTERFACE"
         echo "✓ SSH configured on port $SSH_PORT"
+        echo "✓ UFW enabled and allowing $SSH_PORT/tcp"
         if [[ -n "$SSH_PUBLIC_KEY" ]]; then
             echo "✓ SSH public key added for $PRIMARY_USER user"
         fi
@@ -1839,7 +1848,7 @@ echo "=========================================="
 echo ""
 echo "Summary of changes:"
 if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
-    echo "  ✓ Network configured with static IP"
+    echo "  ✓ Network configured with static IP, SSH, and UFW"
 fi
 if [[ "$PACKAGES" != "none" && -n "$PACKAGES" ]]; then
     echo "  ✓ Additional packages installed"
