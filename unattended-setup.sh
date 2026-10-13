@@ -101,6 +101,31 @@ fi
 echo "Using primary user: $PRIMARY_USER"
 echo ""
 
+# Omarchy owns system upgrades (snapshots, migrations, and user update state).
+# Run `omarchy update` as the desktop user before setup on a fresh installation.
+# Do not synchronize databases here or bypass Omarchy's pacman upgrade guard.
+setup_install_packages() {
+    local db_path repo
+    if ! db_path=$(pacman-conf DBPath); then
+        echo "ERROR: Could not read pacman's database path." >&2
+        return 1
+    fi
+    local repositories
+    if ! repositories=$(pacman-conf --repo-list); then
+        echo "ERROR: Could not read pacman's repositories." >&2
+        return 1
+    fi
+    while IFS= read -r repo; do
+        [[ -n "$repo" ]] || continue
+        if [[ ! -s "${db_path%/}/sync/$repo.db" ]]; then
+            echo "ERROR: Missing package database for '$repo'." >&2
+            echo "Run 'omarchy update' as your normal user, let it finish successfully, then rerun this setup script." >&2
+            return 1
+        fi
+    done <<< "$repositories"
+    pacman -S --needed --noconfirm "$@"
+}
+
 # >>> HYPR AUTOLOCK LIB >>>
 HYPR_AUTOLOCK_CONF_MARKER="# Auto-lock screen after autologin for security"
 HYPR_AUTOLOCK_CONF_END_MARKER="# End Auto-lock screen after autologin for security"
@@ -303,7 +328,7 @@ hypr_resolve_lock_command() {
             return 1
         fi
         echo "⚠ Neither Omarchy's lock command nor hyprlock was found; installing the fallback..." >&2
-        if ! pacman -S --needed --noconfirm hyprlock hypridle >&2; then
+        if ! setup_install_packages hyprlock hypridle >&2; then
             echo "⚠ Error: Could not install the fallback screen locker" >&2
             return 1
         fi
@@ -607,8 +632,9 @@ configure_static_ip() {
     local interface="$1"
     local static_ip="$2"
     local gateway="$3"
-    local conn
+    local conn="${4:-}"
     local dev_type
+    local active_uuid
 
     if systemctl is-enabled NetworkManager.service &>/dev/null \
         || systemctl is-active NetworkManager.service &>/dev/null; then
@@ -621,15 +647,9 @@ configure_static_ip() {
 
         systemctl start NetworkManager.service >/dev/null 2>&1 || true
 
-        conn=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null \
-            | awk -F: -v iface="$interface" '$2 == iface {print $1; exit}')
-        if [[ -z "$conn" ]]; then
-            conn=$(nmcli -t -f NAME,DEVICE connection show 2>/dev/null \
-                | awk -F: -v iface="$interface" '$2 == iface {print $1; exit}')
-        fi
-        if [[ -z "$conn" ]]; then
-            conn=$(nmcli -t -f NAME,connection.interface-name connection show 2>/dev/null \
-                | awk -F: -v iface="$interface" '$NF == iface {print $1; exit}')
+        active_uuid=$(nmcli -g GENERAL.CON-UUID device show "$interface" 2>/dev/null)
+        if [[ -z "$conn" && -n "$active_uuid" && "$active_uuid" != "--" ]]; then
+            conn="$active_uuid"
         fi
 
         dev_type=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
@@ -637,14 +657,18 @@ configure_static_ip() {
 
         if [[ -n "$conn" ]]; then
             echo "Updating existing connection '$conn' on $interface..."
-            nmcli connection modify "$conn" \
+            nmcli connection modify uuid "$conn" \
                 ipv4.method manual \
                 ipv4.addresses "$static_ip/24" \
                 ipv4.gateway "$gateway" \
-                ipv4.dns "8.8.8.8 8.8.4.4" \
+                ipv4.dns "$gateway" \
                 ipv4.ignore-auto-dns yes \
-                connection.autoconnect yes
-            nmcli connection up "$conn"
+                connection.autoconnect yes || return 1
+            if [[ "$conn" == "$active_uuid" ]]; then
+                nmcli connection up uuid "$conn" ifname "$interface" || return 1
+            else
+                echo "✓ Saved settings for inactive profile; current connection remains active."
+            fi
         else
             if [[ "$dev_type" == "wifi" ]]; then
                 echo "⚠ Error: No saved NetworkManager connection for Wi-Fi interface $interface."
@@ -657,10 +681,10 @@ configure_static_ip() {
                 ipv4.method manual \
                 ipv4.addresses "$static_ip/24" \
                 ipv4.gateway "$gateway" \
-                ipv4.dns "8.8.8.8 8.8.4.4" \
+                ipv4.dns "$gateway" \
                 ipv4.ignore-auto-dns yes \
-                connection.autoconnect yes
-            nmcli connection up "$conn"
+                connection.autoconnect yes || return 1
+            nmcli connection up "$conn" ifname "$interface" || return 1
         fi
 
         echo "✓ Static IP configured via NetworkManager"
@@ -676,8 +700,7 @@ Name=$interface
 [Network]
 Address=$static_ip/24
 Gateway=$gateway
-DNS=8.8.8.8
-DNS=8.8.4.4
+DNS=$gateway
 EOF
     systemctl enable systemd-networkd
     systemctl restart systemd-networkd
@@ -724,6 +747,23 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
         done
     fi
     
+    NETWORK_PROFILE_UUID=""
+    if command -v nmcli >/dev/null 2>&1 \
+        && [[ "$(nmcli -g GENERAL.TYPE device show "$INTERFACE" 2>/dev/null)" == "wifi" ]]; then
+        echo "Saved Wi-Fi profiles (choose the permanent network, even if currently disconnected):"
+        nmcli -f NAME,UUID,TYPE connection show
+        while true; do
+            read -r -p "Wi-Fi profile name or UUID to configure: " NETWORK_PROFILE
+            [[ -n "$NETWORK_PROFILE" ]] || continue
+            if NETWORK_PROFILE_UUID=$(nmcli -g connection.uuid connection show "$NETWORK_PROFILE" 2>/dev/null) \
+                && [[ "$(nmcli -g connection.type connection show uuid "$NETWORK_PROFILE_UUID")" == "802-11-wireless" ]]; then
+                break
+            fi
+            echo "Choose an existing Wi-Fi profile; connect to it once first if it is not saved."
+        done
+        echo "Only this profile will receive the static IP. An inactive profile will stay disconnected."
+    fi
+
     DEFAULT_SSH_PORT=22
     if [[ "$OMARCHY_IS_QUATTRO" == true ]]; then
         CURRENT_SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
@@ -747,7 +787,8 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     echo "  Network Interface: $INTERFACE"
     echo "  Static IP: $STATIC_IP"
     echo "  Gateway: $GATEWAY"
-    echo "  DNS: 8.8.8.8, 8.8.4.4"
+    echo "  DNS: $GATEWAY"
+    [[ -z "$NETWORK_PROFILE_UUID" ]] || echo "  Wi-Fi profile: $NETWORK_PROFILE ($NETWORK_PROFILE_UUID)"
     echo ""
     read -p "Continue with this configuration? [Y/n]: " CONFIRM
     CONFIRM=${CONFIRM:-Y}
@@ -756,10 +797,10 @@ if [[ "$CONFIGURE_NETWORK" =~ ^[Yy]$ ]]; then
     else
         echo ""
         echo "[Network 1/6] Installing essential packages..."
-        pacman -S --needed --noconfirm openssh ufw
+        setup_install_packages openssh ufw
 
         echo "[Network 2/6] Configuring static IP address..."
-        if ! configure_static_ip "$INTERFACE" "$STATIC_IP" "$GATEWAY"; then
+        if ! configure_static_ip "$INTERFACE" "$STATIC_IP" "$GATEWAY" "$NETWORK_PROFILE_UUID"; then
             echo "⚠ Static IP configuration failed; continuing with remaining network steps."
         fi
 
@@ -858,7 +899,7 @@ if [[ "$PACKAGES" != "none" && -n "$PACKAGES" ]]; then
     PACKAGE_LIST=$(echo "$PACKAGES" | tr ',' ' ')
     
     echo "Installing packages: $PACKAGE_LIST"
-    if pacman -S --needed --noconfirm $PACKAGE_LIST; then
+    if setup_install_packages $PACKAGE_LIST; then
         echo "✓ Packages installed successfully"
     else
         echo "⚠ Some packages failed to install"
@@ -883,7 +924,7 @@ if [[ "$SWAP_KEYS" =~ ^[Yy]$ ]]; then
     # Install keyd
     echo "Installing keyd..."
     if ! command -v keyd &> /dev/null; then
-        pacman -S --needed --noconfirm keyd
+        setup_install_packages keyd
         echo "✓ keyd installed"
     else
         echo "✓ keyd already installed"
@@ -1586,6 +1627,7 @@ if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
 
         echo "[Headless 4/4] Installing 'gui' convenience launcher for Hyprland..."
         GUI_LAUNCHER="/usr/local/bin/gui"
+        install -d -m 0755 /usr/local/bin
         cat > "$GUI_LAUNCHER" <<'GUI_EOF'
 #!/bin/bash
 # Launch the Omarchy Hyprland session on demand from a TTY.
@@ -1593,21 +1635,25 @@ if [[ "$CONFIGURE_HEADLESS" =~ ^[Yy]$ ]]; then
 # Omarchy shell (bar, menus, lock, notifications).
 # Older Omarchy: exec Hyprland directly; exec-once starts ancillary services.
 
-if [[ -n "$WAYLAND_DISPLAY" ]] || [[ -n "$DISPLAY" ]]; then
+if (( EUID == 0 )); then
+    echo "ERROR: Run 'gui' as your normal user, without sudo."
+    exit 1
+fi
+
+if [[ -n "${WAYLAND_DISPLAY:-}" ]] || [[ -n "${DISPLAY:-}" ]]; then
     echo "A GUI session appears to already be running."
     echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY DISPLAY=$DISPLAY"
     exit 1
 fi
 
-if [[ -z "$XDG_VTNR" ]] || [[ "$XDG_VTNR" -eq 0 ]]; then
+if [[ -n "${SSH_CONNECTION:-}" || ! "${XDG_VTNR:-}" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: 'gui' must be run from a physical TTY, not over SSH."
-    echo "If you need a GUI over the network, consider VNC, RDP, or x11vnc instead."
     exit 1
 fi
 
 export XDG_SESSION_TYPE=wayland
 
-# Match Omarchy's packaged wayland session (omarchy.desktop).
+# Match /usr/share/omarchy/default/wayland-sessions/omarchy.desktop.
 if command -v uwsm >/dev/null 2>&1; then
     exec uwsm start -g -1 -e -D Hyprland hyprland.desktop
 fi
@@ -1616,7 +1662,7 @@ export XDG_SESSION_DESKTOP=Hyprland
 export XDG_CURRENT_DESKTOP=Hyprland
 exec Hyprland
 GUI_EOF
-        chmod +x "$GUI_LAUNCHER"
+        chmod 0755 "$GUI_LAUNCHER"
         echo "✓ Created $GUI_LAUNCHER"
 
         echo ""
@@ -1625,7 +1671,7 @@ GUI_EOF
         echo "After reboot:"
         echo "  • System will boot to text console login on tty1"
         echo "  • Log in with username/password (or SSH from another machine)"
-        echo "  • To launch GUI: type 'gui' at the console"
+        echo "  • To launch GUI: type 'gui' at the console as your normal user (no sudo)"
         echo "  • To re-enable graphical boot:"
         echo "      sudo systemctl set-default graphical.target"
         echo "      sudo systemctl enable sddm.service"
@@ -1778,7 +1824,7 @@ if [[ "$INSTALL_AI_PACKAGES" =~ ^[Yy]$ ]]; then
 
     if [[ "$CONFIRM_AI_PACKAGES" =~ ^[Yy]$ ]]; then
         echo "Installing packages (this may take a few minutes)..."
-        pacman -S --needed --noconfirm \
+        setup_install_packages \
             python-pip python-virtualenv python-pipx \
             base-devel \
             nvtop iotop htop \
